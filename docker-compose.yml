@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  sonora-bot:
+    build: .
+    container_name: sonora-bot
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      - SONORA_BOT_TOKEN=${SONORA_BOT_TOKEN:-9127762870:AAHJXJL9EADvRAeTh8zdblhBbbjLxvBtPgU}
+      - SONORA_BOT_USERNAME=${SONORA_BOT_USERNAME:-sonoramus1c_bot}
+      - SONORA_AUTH_PORT=8088
+    volumes:
+      - sonora_data:/app/data
+      - sonora_avatars:/app/avatars
+      - ./downloads:/app/downloads
+
+volumes:
+  sonora_data:
+    driver: local
+  sonora_avatars:
+    driver: local

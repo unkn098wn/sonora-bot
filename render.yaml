@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: sonora-bot
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    region: frankfurt
+    envVars:
+      - key: SONORA_BOT_TOKEN
+        value: 9127762870:AAHJXJL9EADvRAeTh8zdblhBbbjLxvBtPgU
+      - key: SONORA_BOT_USERNAME
+        value: sonoramus1c_bot
+      - key: PORT
+        value: 8088

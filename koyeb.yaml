@@ -1,0 +1,23 @@
+# Koyeb App Specification for Sonora Music Telegram Bot & REST API Gateway
+app: sonora-music
+services:
+  - name: sonora-bot
+    type: web
+    docker:
+      dockerfile: Dockerfile
+    instance_type: nano
+    regions:
+      - fra
+    ports:
+      - port: 8088
+        protocol: http
+    routes:
+      - path: /
+        port: 8088
+    env:
+      - key: SONORA_AUTH_PORT
+        value: "8088"
+      - key: SONORA_BOT_USERNAME
+        value: "sonoramus1c_bot"
+      - key: SONORA_BOT_TOKEN
+        value: "9127762870:AAHJXJL9EADvRAeTh8zdblhBbbjLxvBtPgU"
