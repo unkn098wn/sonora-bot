@@ -29,8 +29,8 @@ import secrets
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple, List
 from aiohttp import web
 import re
 import smtplib
@@ -68,14 +68,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 AVATARS_DIR = os.path.join(BASE_DIR, "avatars")
 USERS_DB_PATH = os.path.join(DATA_DIR, "users.json")
+REPORTS_DB_PATH = os.path.join(DATA_DIR, "reports.json")
 LIBRARIES_DIR = os.path.join(DATA_DIR, "libraries")
+REPORTS_ATTACHMENTS_DIR = os.path.join(DATA_DIR, "reports_attachments")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(AVATARS_DIR, exist_ok=True)
 os.makedirs(LIBRARIES_DIR, exist_ok=True)
+os.makedirs(REPORTS_ATTACHMENTS_DIR, exist_ok=True)
 
 # Configuration
 BOT_TOKEN = os.getenv("SONORA_BOT_TOKEN", "9127762870:AAHJXJL9EADvRAeTh8zdblhBbbjLxvBtPgU").strip()
 BOT_USERNAME = os.getenv("SONORA_BOT_USERNAME", "sonoramus1c_bot").strip().lstrip("@")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "960674720"))  # @wezreg is the exclusive admin
 HTTP_PORT = int(os.getenv("PORT", os.getenv("SONORA_AUTH_PORT", "8088")))
 OTP_TTL_SECONDS = 600  # 10 minutes
 MAX_ATTEMPTS_PER_SESSION = 5
@@ -330,6 +334,92 @@ class UserManager:
             return {}
 
 user_manager = UserManager(USERS_DB_PATH)
+
+
+class ReportsManager:
+    """Thread-safe persistent JSON database of feedback & bug reports."""
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        self._reports: List[dict] = []
+        self._lock = asyncio.Lock()
+        self._load()
+
+    def _load(self):
+        if os.path.isfile(self.db_path):
+            try:
+                with open(self.db_path, "r", encoding="utf-8") as f:
+                    self._reports = json.load(f)
+                logger.info(f"Loaded {len(self._reports)} reports from {self.db_path}")
+            except Exception as e:
+                logger.error(f"Failed to load reports DB: {e}")
+                self._reports = []
+        else:
+            self._reports = []
+            self._save_sync()
+
+    def _save_sync(self):
+        try:
+            with open(self.db_path, "w", encoding="utf-8") as f:
+                json.dump(self._reports, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save reports DB: {e}")
+
+    async def add_report(
+        self,
+        category: str,
+        name: str,
+        contact: str,
+        message: str,
+        version: str = "v2.6.0",
+        source: str = "website",
+        telegram_id: Optional[int] = None,
+        attachment_path: Optional[str] = None
+    ) -> dict:
+        async with self._lock:
+            ticket_id = f"SON-{random.randint(1000, 9999)}"
+            report = {
+                "ticket_id": ticket_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "category": category,  # 'bug', 'idea', 'question'
+                "name": name,
+                "contact": contact,
+                "telegram_id": telegram_id,
+                "message": message,
+                "version": version,
+                "status": "new",  # 'new', 'in_progress', 'resolved', 'rejected'
+                "source": source,
+                "attachment_path": attachment_path,
+            }
+            self._reports.insert(0, report)
+            self._save_sync()
+            return report
+
+    async def get_all(self, status: Optional[str] = None) -> List[dict]:
+        async with self._lock:
+            if not status or status == "all":
+                return list(self._reports)
+            return [r for r in self._reports if r.get("status") == status]
+
+    async def get_by_ticket(self, ticket_id: str) -> Optional[dict]:
+        async with self._lock:
+            for r in self._reports:
+                if r.get("ticket_id") == ticket_id:
+                    return r
+            return None
+
+    async def update_status(self, ticket_id: str, new_status: str) -> bool:
+        async with self._lock:
+            for r in self._reports:
+                if r.get("ticket_id") == ticket_id:
+                    r["status"] = new_status
+                    r["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    self._save_sync()
+                    return True
+            return False
+
+
+reports_manager = ReportsManager(REPORTS_DB_PATH)
 
 
 # ==============================================================================
@@ -695,6 +785,92 @@ async def handle_library_sync_post(request: web.Request) -> web.Response:
         "playlist_count": playlist_count,
         "favorite_count": favorite_count,
     })
+
+
+async def handle_feedback_post(request: web.Request) -> web.Response:
+    headers = {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+    }
+    try:
+        body = await request.json()
+        category = (body.get("category") or "bug").strip().lower()
+        name = (body.get("name") or "Слушатель Sonora").strip()
+        contact = (body.get("contact") or "").strip()
+        message = (body.get("message") or "").strip()
+        version = (body.get("version") or "v2.6.0").strip()
+        source = (body.get("source") or "website").strip()
+
+        if not message:
+            return web.json_response(
+                {"success": False, "error": "Текст обращения не может быть пустым"},
+                status=400,
+                headers=headers
+            )
+
+        report = await reports_manager.add_report(
+            category=category,
+            name=name,
+            contact=contact,
+            message=message,
+            version=version,
+            source=source,
+        )
+
+        ticket_id = report["ticket_id"]
+        logger.info(f"New feedback received #{ticket_id} [{category}] from {name} ({contact})")
+
+        # Instant alert to Admin (@wezreg, ID: 960674720)
+        if active_bot_instance and ADMIN_ID:
+            icon = "🐞" if category == "bug" else ("💡" if category == "idea" else "❓")
+            cat_name = "БАГ-РЕПОРТ" if category == "bug" else ("ПРЕДЛОЖЕНИЕ" if category == "idea" else "ВОПРОС")
+            alert_text = (
+                f"🚨 <b>НОВОЕ ОБРАЩЕНИЕ С САЙТА #{ticket_id}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Категория:</b> {icon} <b>{cat_name}</b>\n"
+                f"<b>Отправитель:</b> {html.escape(name)} (<code>{html.escape(contact) if contact else 'Не указан'}</code>)\n"
+                f"<b>Платформа/версия:</b> <code>{html.escape(version)}</code>\n"
+                f"<b>Источник:</b> {source}\n\n"
+                f"📝 <b>Сообщение:</b>\n<i>{html.escape(message)}</i>"
+            )
+            admin_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{ticket_id}_resolved"),
+                        InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{ticket_id}_in_progress"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="🔐 Вся админ-панель", callback_data="admin_panel"),
+                    ]
+                ]
+            )
+            try:
+                await active_bot_instance.send_message(chat_id=ADMIN_ID, text=alert_text, reply_markup=admin_kb)
+            except Exception as ex:
+                logger.warning(f"Failed to deliver Telegram notification to admin {ADMIN_ID}: {ex}")
+
+        return web.json_response({
+            "success": True,
+            "ticket_id": ticket_id,
+            "message": "Обращение успешно отправлено"
+        }, headers=headers)
+    except Exception as e:
+        logger.error(f"Error handling /api/feedback: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500, headers=headers)
+
+
+async def handle_feedback_get(request: web.Request) -> web.Response:
+    headers = {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+    }
+    status = request.query.get("status")
+    reports = await reports_manager.get_all(status=status)
+    return web.json_response({
+        "success": True,
+        "total": len(reports),
+        "reports": reports
+    }, headers=headers)
 
 
 async def handle_request_otp(request: web.Request) -> web.Response:
@@ -1791,6 +1967,9 @@ def create_http_app() -> web.Application:
     app.router.add_post("/api/library/sync", handle_library_sync_post)
     app.router.add_get("/api/user/library", handle_library_sync_get)
     app.router.add_post("/api/user/library", handle_library_sync_post)
+    # Feedback & Bug Reports
+    app.router.add_post("/api/feedback", handle_feedback_post)
+    app.router.add_get("/api/feedback", handle_feedback_get)
     # Avatars
     app.router.add_get("/api/avatar/{handle}", handle_serve_avatar)
     # Google OAuth Web Portal
@@ -1811,6 +1990,8 @@ BOT_START_TIME = datetime.utcnow()
 
 # Chat cleanup registry: chat_id -> last_menu_message_id
 user_last_menu: Dict[int, int] = {}
+# Feedback draft state: chat_id -> {"stage": ..., "category": ...}
+user_feedback_state: Dict[int, dict] = {}
 
 
 def get_uptime_string() -> str:
@@ -2061,6 +2242,16 @@ async def run_telegram_bot():
                     ],
                     [
                         InlineKeyboardButton(
+                            text="💬 Обратная связь",
+                            callback_data="feedback_start",
+                        ),
+                        InlineKeyboardButton(
+                            text="🛡️ Конфиденциальность",
+                            callback_data="privacy_menu",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
                             text="📊 Статус серверов",
                             callback_data="status_menu",
                         ),
@@ -2072,41 +2263,58 @@ async def run_telegram_bot():
                 ]
             )
 
-        def get_user_keyboard() -> InlineKeyboardMarkup:
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🔄 Запросить новый код",
-                            callback_data="refresh_code",
-                        ),
-                        InlineKeyboardButton(
-                            text="👤 Мой профиль",
-                            callback_data="my_profile",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="📦 Скачать Sonora",
-                            callback_data="dl_menu",
-                        ),
-                        InlineKeyboardButton(
-                            text="✨ Возможности",
-                            callback_data="features_menu",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="📊 Статус серверов",
-                            callback_data="status_menu",
-                        ),
-                        InlineKeyboardButton(
-                            text="❓ Как войти?",
-                            callback_data="help_login",
-                        ),
-                    ],
-                ]
-            )
+        def get_user_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+            rows = []
+            if is_admin:
+                rows.append([
+                    InlineKeyboardButton(
+                        text="🔐 Панель администратора (Отчеты)",
+                        callback_data="admin_panel",
+                    )
+                ])
+            rows.extend([
+                [
+                    InlineKeyboardButton(
+                        text="🔄 Запросить новый код",
+                        callback_data="refresh_code",
+                    ),
+                    InlineKeyboardButton(
+                        text="👤 Мой профиль",
+                        callback_data="my_profile",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📦 Скачать Sonora",
+                        callback_data="dl_menu",
+                    ),
+                    InlineKeyboardButton(
+                        text="✨ Возможности",
+                        callback_data="features_menu",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="💬 Обратная связь",
+                        callback_data="feedback_start",
+                    ),
+                    InlineKeyboardButton(
+                        text="🛡️ Конфиденциальность",
+                        callback_data="privacy_menu",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📊 Статус серверов",
+                        callback_data="status_menu",
+                    ),
+                    InlineKeyboardButton(
+                        text="❓ Как войти?",
+                        callback_data="help_login",
+                    ),
+                ],
+            ])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
 
         def get_download_keyboard() -> InlineKeyboardMarkup:
             return InlineKeyboardMarkup(
@@ -2148,18 +2356,23 @@ async def run_telegram_bot():
                 ]
             )
 
-        def get_profile_keyboard() -> InlineKeyboardMarkup:
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="🔑 Получить код для входа", callback_data="refresh_code"),
-                        InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
-                    ],
-                    [
-                        InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
-                    ],
-                ]
-            )
+        def get_profile_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+            rows = []
+            if is_admin:
+                rows.append([
+                    InlineKeyboardButton(text="🔐 Панель администратора", callback_data="admin_panel")
+                ])
+            rows.extend([
+                [
+                    InlineKeyboardButton(text="🔑 Получить код для входа", callback_data="refresh_code"),
+                    InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
+                ],
+                [
+                    InlineKeyboardButton(text="💬 Обратная связь", callback_data="feedback_start"),
+                    InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
+                ],
+            ])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
 
         def get_status_keyboard() -> InlineKeyboardMarkup:
             return InlineKeyboardMarkup(
@@ -2571,9 +2784,342 @@ async def run_telegram_bot():
             text = format_downloads_menu()
             await safe_edit_or_resend(callback, text, reply_markup=get_download_keyboard())
 
+        # ======================================================================
+        # PRIVACY & TERMS HANDLERS
+        # ======================================================================
+        @dp.message(Command("privacy"))
+        @dp.callback_query(F.data == "privacy_menu")
+        async def on_privacy_menu_call(event: types.TelegramObject):
+            text = (
+                "🛡️ <b>Политика конфиденциальности Sonora Music</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Sonora спроектирована по принципу абсолютной приватности:\n\n"
+                "• <b>Без рекламы и телеметрии:</b> В приложении нет сторонних рекламных SDK, скрытых трекеров и шпионских модулей.\n"
+                "• <b>Авторизация без паролей:</b> Вход по одноразовым 6-значным OTP-кодам Telegram — мы не храним ваши пароли.\n"
+                "• <b>Защищенная медиатека:</b> Плейлисты и избранные треки шифруются и синхронизируются через Cloudflare KV, дублируясь локально в памяти устройства.\n"
+                "• <b>Открытые стриминги:</b> Запросы к музыкальным сервисам (YouTube Music, SoundCloud, Deezer) выполняются исключительно для получения открытого аудиопотока.\n\n"
+                "<i>С полной официальной версией документа можно ознакомиться на нашем сайте:</i>"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🌐 Открыть на сайте (privacy.html)",
+                            url="https://sonora-website.maksinegor821.workers.dev/privacy.html",
+                        )
+                    ],
+                    [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home")],
+                ]
+            )
+            if isinstance(event, types.CallbackQuery):
+                await safe_edit_or_resend(event, text, reply_markup=kb)
+                await event.answer()
+            else:
+                await handle_user_command(event, text, reply_markup=kb)
+
+        @dp.message(Command("terms"))
+        @dp.callback_query(F.data == "terms_menu")
+        async def on_terms_menu_call(event: types.TelegramObject):
+            text = (
+                "📜 <b>Условия использования Sonora Music</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "• Sonora — свободный независимый плеер для персонального некоммерческого прослушивания аудиозаписей.\n"
+                "• Все авторские права на музыкальные произведения, обложки и товарные знаки принадлежат соответствующим правообладателям и платформам.\n"
+                "• Приложение предоставляется на условиях «КАК ЕСТЬ» (AS IS).\n\n"
+                "<i>Полная версия пользовательского соглашения на сайте:</i>"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🌐 Открыть на сайте (terms.html)",
+                            url="https://sonora-website.maksinegor821.workers.dev/terms.html",
+                        )
+                    ],
+                    [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home")],
+                ]
+            )
+            if isinstance(event, types.CallbackQuery):
+                await safe_edit_or_resend(event, text, reply_markup=kb)
+                await event.answer()
+            else:
+                await handle_user_command(event, text, reply_markup=kb)
+
+        # ======================================================================
+        # USER FEEDBACK HANDLERS
+        # ======================================================================
+        @dp.message(Command("feedback", "report", "bug"))
+        @dp.callback_query(F.data == "feedback_start")
+        async def on_feedback_start(event: types.TelegramObject):
+            text = (
+                "💬 <b>Обратная связь и поддержка Sonora Music</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Нашли баг, хотите предложить классную функцию или задать вопрос?\n\n"
+                "<i>Выберите тему обращения:</i>"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🐞 Сообщить о баге", callback_data="fb_cat_bug")],
+                    [InlineKeyboardButton(text="💡 Предложить идею", callback_data="fb_cat_idea")],
+                    [InlineKeyboardButton(text="❓ Задать вопрос", callback_data="fb_cat_question")],
+                    [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home")],
+                ]
+            )
+            if isinstance(event, types.CallbackQuery):
+                await safe_edit_or_resend(event, text, reply_markup=kb)
+                await event.answer()
+            else:
+                await handle_user_command(event, text, reply_markup=kb)
+
+        @dp.callback_query(F.data.startswith("fb_cat_"))
+        async def on_feedback_cat(callback: types.CallbackQuery):
+            cat = callback.data.replace("fb_cat_", "")
+            chat_id = callback.message.chat.id
+            cat_name = "баге" if cat == "bug" else ("идее" if cat == "idea" else "вопросе")
+            user_feedback_state[chat_id] = {
+                "stage": "waiting_text",
+                "category": cat
+            }
+            text = (
+                f"✍️ <b>Опишите информацию о {cat_name}:</b>\n\n"
+                f"Отправьте сообщение прямо в этот чат. Если это ошибка, можно прикрепить фото или скриншот.\n\n"
+                f"<i>Для отмены нажмите кнопку ниже:</i>"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="❌ Отменить", callback_data="back_home")]
+                ]
+            )
+            await safe_edit_or_resend(callback, text, reply_markup=kb)
+            await callback.answer()
+
+        # ======================================================================
+        # ADMIN PANEL (EXCLUSIVE FOR ADMIN_ID: 960674720)
+        # ======================================================================
+        @dp.message(Command("admin"))
+        @dp.callback_query(F.data == "admin_panel")
+        async def on_admin_panel(event: types.TelegramObject):
+            user_id = event.from_user.id
+            if user_id != ADMIN_ID:
+                text = "⛔ <b>Доступ ограничен.</b>\nПанель управления доступна только администратору проекта Sonora Music."
+                if isinstance(event, types.CallbackQuery):
+                    await event.answer("Доступ ограничен", show_alert=True)
+                else:
+                    await event.answer(text)
+                return
+
+            reports = await reports_manager.get_all()
+            new_cnt = sum(1 for r in reports if r.get("status") == "new")
+            prog_cnt = sum(1 for r in reports if r.get("status") == "in_progress")
+            res_cnt = sum(1 for r in reports if r.get("status") == "resolved")
+
+            text = (
+                f"🔐 <b>Панель управления Sonora Admin</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>Администратор:</b> @wezreg (ID: <code>{ADMIN_ID}</code>)\n"
+                f"📊 <b>Всего обращений в базе:</b> {len(reports)}\n\n"
+                f"🔴 Новых: <b>{new_cnt}</b>\n"
+                f"🟡 В работе: <b>{prog_cnt}</b>\n"
+                f"🟢 Решено: <b>{res_cnt}</b>\n\n"
+                f"<i>Выберите фильтр для просмотра отчетов:</i>"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text=f"🔴 Новые ({new_cnt})", callback_data="adm_list_0_new"),
+                        InlineKeyboardButton(text=f"🟡 В работе ({prog_cnt})", callback_data="adm_list_0_in_progress"),
+                    ],
+                    [
+                        InlineKeyboardButton(text=f"🟢 Решенные ({res_cnt})", callback_data="adm_list_0_resolved"),
+                        InlineKeyboardButton(text=f"📁 Все тикеты ({len(reports)})", callback_data="adm_list_0_all"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_home"),
+                    ]
+                ]
+            )
+            if isinstance(event, types.CallbackQuery):
+                await safe_edit_or_resend(event, text, reply_markup=kb)
+                await event.answer()
+            else:
+                await handle_user_command(event, text, reply_markup=kb)
+
+        @dp.callback_query(F.data.startswith("adm_list_"))
+        async def on_admin_list(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+
+            parts = callback.data.split("_")
+            page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            filter_status = parts[3] if len(parts) > 3 else "all"
+
+            reports = await reports_manager.get_all(status=filter_status if filter_status != "all" else None)
+            total = len(reports)
+            per_page = 5
+            total_pages = max(1, (total + per_page - 1) // per_page)
+            page = max(0, min(page, total_pages - 1))
+
+            start = page * per_page
+            page_items = reports[start : start + per_page]
+
+            status_titles = {"all": "Все", "new": "Новые", "in_progress": "В работе", "resolved": "Решенные"}
+            text = (
+                f"📋 <b>Обращения ({status_titles.get(filter_status, filter_status)})</b>\n"
+                f"Страница {page + 1} из {total_pages} (Всего: {total}):\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            if not page_items:
+                text += "<i>В данной категории нет обращений.</i>"
+
+            rows = []
+            for r in page_items:
+                tid = r.get("ticket_id", "???")
+                cat_icon = "🐞" if r.get("category") == "bug" else ("💡" if r.get("category") == "idea" else "❓")
+                st_icon = "🔴" if r.get("status") == "new" else ("🟡" if r.get("status") == "in_progress" else "🟢")
+                name_short = (r.get("name") or "Аноним")[:14]
+                btn_text = f"{st_icon} #{tid} {cat_icon} {name_short}"
+                rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_view_{tid}_{page}_{filter_status}")])
+
+            nav_row = []
+            if page > 0:
+                nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_list_{page - 1}_{filter_status}"))
+            if page < total_pages - 1:
+                nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"adm_list_{page + 1}_{filter_status}"))
+            if nav_row:
+                rows.append(nav_row)
+
+            rows.append([InlineKeyboardButton(text="◀️ В меню админа", callback_data="admin_panel")])
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+            await safe_edit_or_resend(callback, text, reply_markup=kb)
+            await callback.answer()
+
+        @dp.callback_query(F.data.startswith("adm_view_"))
+        async def on_admin_view(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+
+            parts = callback.data.split("_")
+            tid = parts[2]
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            filter_status = parts[4] if len(parts) > 4 else "all"
+
+            report = await reports_manager.get_by_ticket(tid)
+            if not report:
+                await callback.answer("Тикет не найден", show_alert=True)
+                return
+
+            st = report.get("status", "new")
+            st_text = "🔴 Новый" if st == "new" else ("🟡 В работе" if st == "in_progress" else "🟢 Решено")
+            cat_text = "🐞 Баг" if report.get("category") == "bug" else ("💡 Идея" if report.get("category") == "idea" else "❓ Вопрос")
+
+            text = (
+                f"📑 <b>Тикет #{tid}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Категория:</b> {cat_text}\n"
+                f"<b>Статус:</b> {st_text}\n"
+                f"<b>Дата:</b> <code>{report.get('timestamp', '')[:19].replace('T', ' ')}</code>\n"
+                f"<b>Источник:</b> {report.get('source', 'website')}\n"
+                f"<b>Отправитель:</b> {html.escape(report.get('name') or '')} (<code>{html.escape(report.get('contact') or 'Не указан')}</code>)\n"
+                f"<b>Версия:</b> <code>{html.escape(report.get('version') or '')}</code>\n\n"
+                f"📝 <b>Сообщение:</b>\n<i>{html.escape(report.get('message') or '')}</i>"
+            )
+
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}"),
+                        InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_{page}_{filter_status}"),
+                        InlineKeyboardButton(text="🔴 Новый", callback_data=f"adm_st_{tid}_new_{page}_{filter_status}"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"adm_list_{page}_{filter_status}"),
+                    ]
+                ]
+            )
+            await safe_edit_or_resend(callback, text, reply_markup=kb)
+            await callback.answer()
+
+        @dp.callback_query(F.data.startswith("adm_st_"))
+        async def on_admin_change_st(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+
+            parts = callback.data.split("_")
+            tid = parts[2]
+            new_st = parts[3]
+            page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+            filter_status = parts[5] if len(parts) > 5 else "all"
+
+            success = await reports_manager.update_status(tid, new_st)
+            if success:
+                st_label = "Решено" if new_st == "resolved" else ("В работе" if new_st == "in_progress" else "Новый")
+                await callback.answer(f"✅ Статус тикета #{tid} изменен на: {st_label}", show_alert=True)
+                callback.data = f"adm_view_{tid}_{page}_{filter_status}"
+                await on_admin_view(callback)
+            else:
+                await callback.answer("Ошибка смены статуса", show_alert=True)
+
         @dp.message()
         async def on_any_incoming_message(message: types.Message):
-            """Ensures the bot ALWAYS responds to ANY message or text sent by the user."""
+            """Ensures the bot responds to user feedback inputs, or routes to start."""
+            chat_id = message.chat.id
+            if chat_id in user_feedback_state:
+                state = user_feedback_state.pop(chat_id)
+                cat = state.get("category", "bug")
+                user_text = message.text or message.caption or "Скриншот без текстового описания"
+                user_name = message.from_user.first_name or f"User_{message.from_user.id}"
+                contact_handle = f"@{message.from_user.username}" if message.from_user.username else f"ID:{message.from_user.id}"
+
+                report = await reports_manager.add_report(
+                    category=cat,
+                    name=user_name,
+                    contact=contact_handle,
+                    message=user_text,
+                    version="Telegram Bot",
+                    source="telegram",
+                    telegram_id=message.from_user.id,
+                )
+                tid = report["ticket_id"]
+
+                # Notify Admin if message isn't from Admin himself
+                if ADMIN_ID and message.from_user.id != ADMIN_ID:
+                    cat_name = "БАГ-РЕПОРТ" if cat == "bug" else ("ПРЕДЛОЖЕНИЕ" if cat == "idea" else "ВОПРОС")
+                    alert_text = (
+                        f"🚨 <b>НОВОЕ ОБРАЩЕНИЕ ИЗ ТЕЛЕГРАМ #{tid}</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"<b>Категория:</b> <b>{cat_name}</b>\n"
+                        f"<b>От:</b> {html.escape(user_name)} (<code>{contact_handle}</code>)\n\n"
+                        f"📝 <b>Сообщение:</b>\n<i>{html.escape(user_text)}</i>"
+                    )
+                    kb_adm = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_0_all"),
+                                InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_0_all"),
+                            ],
+                            [InlineKeyboardButton(text="🔐 Вся админ-панель", callback_data="admin_panel")]
+                        ]
+                    )
+                    try:
+                        await bot.send_message(chat_id=ADMIN_ID, text=alert_text, reply_markup=kb_adm)
+                    except Exception as e:
+                        logger.warning(f"Failed to alert admin: {e}")
+
+                thanks_text = (
+                    f"✅ <b>Ваше обращение принято! Номер тикета: <code>#{tid}</code></b>\n\n"
+                    f"Спасибо за обратную связь! Информация передана разработчикам для анализа и улучшения Sonora Music."
+                )
+                kb_done = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_home")]
+                    ]
+                )
+                await message.answer(thanks_text, reply_markup=kb_done)
+                return
+
             await on_start(message)
 
         # Register official Telegram Bot Commands Menu
@@ -2583,6 +3129,9 @@ async def run_telegram_bot():
                 types.BotCommand(command="download", description="📦 Скачать файлы (Windows & Android)"),
                 types.BotCommand(command="code", description="🔑 Получить код для входа"),
                 types.BotCommand(command="profile", description="👤 Личный кабинет и статистика"),
+                types.BotCommand(command="feedback", description="💬 Сообщить о баге / Идея"),
+                types.BotCommand(command="privacy", description="🛡️ Политика конфиденциальности"),
+                types.BotCommand(command="terms", description="📜 Условия использования"),
                 types.BotCommand(command="status", description="📊 Статус серверов и сервисов"),
                 types.BotCommand(command="features", description="✨ Возможности плеера"),
                 types.BotCommand(command="help", description="❓ Инструкция по авторизации"),
