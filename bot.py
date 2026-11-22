@@ -2023,7 +2023,7 @@ async def run_telegram_bot():
                     [
                         InlineKeyboardButton(
                             text="🌐 Официальный сайт Sonora",
-                            url="https://sonora-music.ru",
+                            url="https://sonora-website.maksinegor821.workers.dev",
                         ),
                     ],
                     [
@@ -2137,7 +2137,6 @@ async def run_telegram_bot():
             size_bytes = os.path.getsize(file_path)
             # Telegram Bot API standard file upload limit is 50 MB (52,428,800 bytes)
             if size_bytes >= 49 * 1024 * 1024:
-                direct_url = f"https://sonora-music.pages.dev/downloads/{filename}"
                 gh_url = f"https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/{filename}"
                 mb_size = round(size_bytes / (1024 * 1024), 1)
                 text = (
@@ -2147,8 +2146,7 @@ async def run_telegram_bot():
                 )
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text=f"⬇️ Скачать {filename} ({mb_size} МБ)", url=direct_url)],
-                        [InlineKeyboardButton(text="🐙 Зеркало на GitHub Releases", url=gh_url)],
+                        [InlineKeyboardButton(text=f"⬇️ Скачать {filename} ({mb_size} МБ)", url=gh_url)],
                         [InlineKeyboardButton(text="◀️ Меню загрузок", callback_data="dl_menu")],
                     ]
                 )
@@ -2169,7 +2167,7 @@ async def run_telegram_bot():
                 await callback.answer("✅ Файл успешно отправлен в чат!")
             except Exception as e:
                 logger.error(f"Error sending document {filename}: {e}")
-                direct_url = f"https://sonora-music.pages.dev/downloads/{filename}"
+                direct_url = f"https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/{filename}"
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text=f"⬇️ Скачать {filename} по прямой ссылке", url=direct_url)],
