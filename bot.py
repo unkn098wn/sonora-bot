@@ -17,6 +17,7 @@ Features:
 
 import asyncio
 import aiohttp
+import html
 import base64
 import hashlib
 import hmac
@@ -1585,10 +1586,12 @@ CAPTION_APK_ARMV7 = (
 
 
 def format_registered_welcome(first_name: str, handle: str, code: str, remaining_sec: int) -> str:
+    esc_name = html.escape(str(first_name or "Пользователь"))
+    esc_handle = html.escape(str(handle or "user").lstrip("@"))
     return (
-        f"🎧 <b>С возвращением в Sonora Music, {first_name}!</b>\n"
+        f"🎧 <b>С возвращением в Sonora Music, {esc_name}!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Аккаунт: <b>@{handle}</b> <i>(Зарегистрирован ✓)</i>\n"
+        f"👤 Аккаунт: <b>@{esc_handle}</b> <i>(Зарегистрирован ✓)</i>\n"
         f"🟢 Статус: <b>Hi-Fi Без рекламы • 18 платформ</b>\n\n"
         f"🔑 <b>Ваш код подтверждения для входа в плеер:</b>\n"
         f"👉 <code>{code}</code> 👈  <i>(нажмите на код для копирования)</i>\n\n"
@@ -1599,10 +1602,12 @@ def format_registered_welcome(first_name: str, handle: str, code: str, remaining
 
 
 def format_new_registration_card(first_name: str, handle: str, code: str, remaining_sec: int) -> str:
+    esc_name = html.escape(str(first_name or "Пользователь"))
+    esc_handle = html.escape(str(handle or "user").lstrip("@"))
     return (
         f"🎉 <b>Поздравляем с регистрацией в Sonora Music!</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Профиль создан: <b>{first_name}</b> (@{handle})\n"
+        f"👤 Профиль создан: <b>{esc_name}</b> (@{esc_handle})\n"
         f"🟢 Доступ: <b>Активирован (18 музыкальных платформ)</b>\n"
         f"🛡️ Защита: <b>Привязан к вашему Telegram ID</b>\n\n"
         f"🔑 <b>Ваш код для первого входа в приложение:</b>\n"
@@ -1902,8 +1907,17 @@ async def run_telegram_bot():
                 except Exception:
                     pass
             # 3. Send clean new menu
-            new_msg = await message.answer(text, reply_markup=reply_markup)
-            user_last_menu[chat_id] = new_msg.message_id
+            try:
+                new_msg = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
+                user_last_menu[chat_id] = new_msg.message_id
+            except Exception as e:
+                logger.warning(f"Failed to send HTML menu to {chat_id}: {e}. Retrying with plain text.")
+                try:
+                    plain_text = re.sub(r"<[^>]+>", "", text)
+                    new_msg = await bot.send_message(chat_id=chat_id, text=plain_text, reply_markup=reply_markup, parse_mode=None)
+                    user_last_menu[chat_id] = new_msg.message_id
+                except Exception as e2:
+                    logger.error(f"Failed to deliver fallback message: {e2}")
 
         async def send_file_with_cleanup(
             callback: types.CallbackQuery,
@@ -2310,6 +2324,11 @@ async def run_telegram_bot():
                     except Exception:
                         pass
 
+        @dp.message()
+        async def on_any_incoming_message(message: types.Message):
+            """Ensures the bot ALWAYS responds to ANY message or text sent by the user."""
+            await on_start(message)
+
         # Register official Telegram Bot Commands Menu
         try:
             await bot.set_my_commands([
@@ -2331,7 +2350,8 @@ async def run_telegram_bot():
         while True:
             try:
                 await dp.start_polling(bot, handle_signals=False)
-                break
+                logger.warning("Polling сессия завершилась, перезапуск через 2 сек...")
+                await asyncio.sleep(2)
             except Exception as e:
                 logger.error(f"Ошибка polling: {e}. Повтор через {reconnect_delay}с...")
                 await asyncio.sleep(reconnect_delay)
@@ -2353,6 +2373,21 @@ async def main():
 
     # 1. Start Background Janitor
     asyncio.create_task(session_manager.background_janitor())
+    async def keepalive_pinger():
+        """Pings own health endpoint every 5 minutes to prevent Render idle suspension."""
+        await asyncio.sleep(30)
+        while True:
+            try:
+                pub_url = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL") or "https://sonora-bot.onrender.com"
+                if not pub_url.startswith("http"):
+                    pub_url = f"https://{pub_url}"
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as sess:
+                    async with sess.get(f"{pub_url.rstrip('/')}/health") as r:
+                        logger.debug(f"Keep-alive ping: {r.status}")
+            except Exception as e:
+                logger.debug(f"Keep-alive ping error: {e}")
+            await asyncio.sleep(300)
+    asyncio.create_task(keepalive_pinger())
     asyncio.create_task(tunnel_manager.start())
 
     # 2. Start HTTP server
