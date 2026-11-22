@@ -1187,16 +1187,16 @@ async def handle_version(request: web.Request) -> web.Response:
         "build_number": 26,
         "tag_name": "v2.6.0",
         "release_notes": "Sonora 2.6.0: Синхронизация звука с Android, стабильный seek, умный shuffle, 10-полосный эквалайзер и DSP, единый профиль (Email + Telegram), кнопка дизлайка, жанровые фильтры Моей Волны, категории поиска, добавление и обновление плейлистов, HD-обложки, плавные тексты песен, Shazam.",
-        "download_url_windows": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Setup.exe",
-        "download_url_android": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Android.apk",
+        "download_url_windows": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe",
+        "download_url_android": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk",
         "assets": [
             {
                 "name": "Sonora-v2.6.0-Setup.exe",
-                "browser_download_url": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Setup.exe"
+                "browser_download_url": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe"
             },
             {
                 "name": "Sonora-v2.6.0-Android.apk",
-                "browser_download_url": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Android.apk"
+                "browser_download_url": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk"
             }
         ]
     })
@@ -1850,14 +1850,12 @@ def format_guest_welcome() -> str:
 
 def format_downloads_menu() -> str:
     return (
-        "📦 <b>Загрузки Sonora Music v2.6.0 Obsidian Stage:</b>\n"
+        "💿 <b>Официальные установщики Sonora Music v2.6.0:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Выберите нужный официальный дистрибутив:\n\n"
-        "• 💻 <b>Windows Setup (.exe, 28.5 МБ)</b> — Официальный установщик в 1 клик для Windows 10/11\n"
-        "• 📱 <b>Universal Android APK (.apk, 138 МБ)</b> — Единый универсальный APK для всех Android устройств\n"
-        "• 📱 <b>Android APK в чат (.apk, 45.4 МБ)</b> — Легковесная ARM64 версия файлом прямо в Telegram\n"
-        "• ⚡ <b>Windows Portable (.zip, 35.7 МБ)</b> — Портативная версия без инсталляции в систему\n\n"
-        "<i>Нажмите кнопку ниже, чтобы получить файл или ссылку:</i>"
+        "Доступны 2 официальных дистрибутива приложения:\n\n"
+        "📱 <b>Android:</b> Единый универсальный APK (138 МБ) — подходит для любых смартфонов и планшетов на Android.\n"
+        "💻 <b>Windows:</b> Полноценный установщик Setup.exe (28.5 МБ) — установка в 1 клик с ярлыком на рабочем столе.\n\n"
+        "<i>Нажмите на кнопку нужной системы для моментальной загрузки:</i>"
     )
 
 
@@ -2012,32 +2010,20 @@ async def run_telegram_bot():
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="💻 Windows Setup (.exe, 28.5 МБ)",
-                            callback_data="send_setup",
+                            text="📱 Скачать для Android (Универсальный APK, 138 МБ)",
+                            url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk",
                         ),
                     ],
                     [
                         InlineKeyboardButton(
-                            text="📱 Universal Android APK (.apk, 138 МБ)",
-                            callback_data="send_apk",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="📱 Android APK в чат (ARM64, 45.4 МБ)",
-                            callback_data="send_apk_arm64",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="⚡ Windows Portable (.zip, 35.7 МБ)",
-                            callback_data="send_portable",
+                            text="💻 Скачать для Windows (Установщик Setup.exe, 28.5 МБ)",
+                            url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe",
                         ),
                     ],
                     [
                         InlineKeyboardButton(
                             text="🌐 Официальный сайт Sonora",
-                            url="https://sonora-music.pages.dev",
+                            url="https://sonora-music.ru",
                         ),
                     ],
                     [
@@ -2476,111 +2462,13 @@ async def run_telegram_bot():
             await callback.answer()
 
         # ======================================================================
-        # DIRECT FILE DELIVERY HANDLERS (ALL UNDER 50 MB - DIRECT TELEGRAM FILES)
+        # DOWNLOAD HANDLERS (2 OFFICIAL INSTALLERS: ANDROID APK & WINDOWS SETUP)
         # ======================================================================
-        @dp.callback_query(F.data == "send_setup")
-        async def on_send_setup(callback: types.CallbackQuery):
-            path = find_download_file("Sonora-v2.6.0-Windows-x64-Setup.exe")
-            await send_file_with_cleanup(
-                callback=callback,
-                file_path=path,
-                filename="Sonora-v2.6.0-Windows-x64-Setup.exe",
-                caption=CAPTION_SETUP,
-                loading_text="⏳ <i>Загружаем установщик Windows Setup в Telegram... Пожалуйста, подождите.</i>",
-            )
-
-        @dp.callback_query(F.data == "send_portable")
-        async def on_send_portable(callback: types.CallbackQuery):
-            path = find_download_file("Sonora-v2.6.0-Windows-x64-Portable.zip")
-            await send_file_with_cleanup(
-                callback=callback,
-                file_path=path,
-                filename="Sonora-v2.6.0-Windows-x64-Portable.zip",
-                caption=CAPTION_PORTABLE,
-                loading_text="⏳ <i>Загружаем портативную версию Sonora Portable в Telegram... Пожалуйста, подождите.</i>",
-            )
-
-        @dp.callback_query(F.data == "send_apk")
-        async def on_send_apk_universal(callback: types.CallbackQuery):
-            path = find_download_file("Sonora-v2.6.0-Android.apk") or find_download_file("Sonora-v2.6.0-Android-Universal.apk") or find_download_file("Sonora-v2.6.0-Android-Universal-Release.apk")
-            await send_file_with_cleanup(
-                callback=callback,
-                file_path=path,
-                filename="Sonora-v2.6.0-Android.apk",
-                caption=CAPTION_APK_UNIVERSAL,
-                loading_text="⏳ <i>Подготовка Universal Android APK (138 МБ)... Пожалуйста, подождите.</i>",
-            )
-
-        @dp.callback_query(F.data == "send_apk_arm64")
-        async def on_send_apk_arm64(callback: types.CallbackQuery):
-            path = find_download_file("Sonora-v2.6.0-Android-ARM64.apk") or find_download_file("Sonora-v2.6.0-Android.apk")
-            await send_file_with_cleanup(
-                callback=callback,
-                file_path=path,
-                filename="Sonora-v2.6.0-Android-ARM64.apk",
-                caption=CAPTION_APK_ARM64,
-                loading_text="⏳ <i>Загружаем Android APK в Telegram (45.4 МБ)... Пожалуйста, подождите.</i>",
-            )
-
-        @dp.callback_query(F.data == "send_apk_armv7")
-        async def on_send_apk_armv7(callback: types.CallbackQuery):
-            path = find_download_file("Sonora-v2.6.0-Android-ARMv7.apk")
-            await send_file_with_cleanup(
-                callback=callback,
-                file_path=path,
-                filename="Sonora-v2.6.0-Android-ARMv7.apk",
-                caption=CAPTION_APK_ARMV7,
-                loading_text="⏳ <i>Загружаем 32-bit Android APK в Telegram... Пожалуйста, подождите.</i>",
-            )
-
-        @dp.callback_query(F.data == "send_all")
-        async def on_send_all(callback: types.CallbackQuery):
-            await callback.answer("📦 Подготовка полного пакета релизов...")
-            chat_id = callback.message.chat.id
-            status_msg = None
-            try:
-                status_msg = await callback.message.answer(
-                    "📦 <b>Отправка полного пакета дистрибутивов Sonora:</b>\n"
-                    "<i>Пожалуйста, подождите, бот отправляет официальные файлы в чат...</i>"
-                )
-
-                # 1. Windows Setup
-                setup_path = find_download_file("Sonora-v2.6.0-Windows-x64-Setup.exe")
-                if setup_path:
-                    await bot.send_chat_action(chat_id=chat_id, action="upload_document")
-                    await callback.message.answer_document(
-                        FSInputFile(setup_path, filename="Sonora-v2.6.0-Windows-x64-Setup.exe"),
-                        caption=CAPTION_SETUP,
-                    )
-
-                # 2. Windows Portable
-                portable_path = find_download_file("Sonora-v2.6.0-Windows-x64-Portable.zip")
-                if portable_path:
-                    await bot.send_chat_action(chat_id=chat_id, action="upload_document")
-                    await callback.message.answer_document(
-                        FSInputFile(portable_path, filename="Sonora-v2.6.0-Windows-x64-Portable.zip"),
-                        caption=CAPTION_PORTABLE,
-                    )
-
-                # 3. Android APK (ARM64 fits Telegram 50MB limit)
-                apk_path = find_download_file("Sonora-v2.6.0-Android-ARM64.apk")
-                if apk_path and os.path.getsize(apk_path) < 49 * 1024 * 1024:
-                    await bot.send_chat_action(chat_id=chat_id, action="upload_document")
-                    await callback.message.answer_document(
-                        FSInputFile(apk_path, filename="Sonora-v2.6.0-Android-ARM64.apk"),
-                        caption=CAPTION_APK_ARM64,
-                    )
-
-                await callback.answer("🎉 Официальные дистрибутивы успешно отправлены в чат!", show_alert=True)
-            except Exception as e:
-                logger.error(f"Error in on_send_all: {e}")
-                await callback.answer(f"⚠️ Ошибка при отправке пакета: {e}", show_alert=True)
-            finally:
-                if status_msg:
-                    try:
-                        await status_msg.delete()
-                    except Exception:
-                        pass
+        @dp.callback_query(F.data.in_(["send_setup", "send_apk", "send_portable", "send_apk_arm64", "send_apk_armv7", "send_all"]))
+        async def on_download_legacy_callback(callback: types.CallbackQuery):
+            await callback.answer()
+            text = format_downloads_menu()
+            await safe_edit_or_resend(callback, text, reply_markup=get_download_keyboard())
 
         @dp.message()
         async def on_any_incoming_message(message: types.Message):
