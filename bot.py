@@ -1058,6 +1058,7 @@ async def handle_playlist_youtube(request: web.Request) -> web.Response:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
             }
             async with session.post("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", json=payload, headers=headers) as resp:
+                it_status = resp.status
                 if resp.status == 200:
                     data = await resp.json()
                     header = data.get("header", {})
@@ -1126,6 +1127,7 @@ async def handle_playlist_youtube(request: web.Request) -> web.Response:
                         })
     except Exception as e:
         logger.warning(f"Direct InnerTube failed for {list_id}: {e}")
+        it_err = f"{type(e).__name__}: {e}"
 
     # 2. Fallback: Invidious Instances
     instances = [
@@ -1165,7 +1167,7 @@ async def handle_playlist_youtube(request: web.Request) -> web.Response:
         except Exception:
             continue
 
-    return web.json_response({"success": False, "error": "Не удалось загрузить плейлист с серверов YouTube"}, status=502)
+    return web.json_response({"success": False, "error": "Не удалось загрузить плейлист с серверов YouTube", "debug_it": it_err if "it_err" in locals() else f"status_{it_status}" if "it_status" in locals() else "no_call"}, status=502)
 
 
 async def handle_verify_otp(request: web.Request) -> web.Response:
