@@ -37,6 +37,12 @@ import smtplib
 import urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+try:
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+except ImportError:
+    InlineKeyboardMarkup = None
+    InlineKeyboardButton = None
+    FSInputFile = None
 
 # Base paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -864,13 +870,17 @@ async def handle_feedback_get(request: web.Request) -> web.Response:
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
     }
-    status = request.query.get("status")
-    reports = await reports_manager.get_all(status=status)
-    return web.json_response({
-        "success": True,
-        "total": len(reports),
-        "reports": reports
-    }, headers=headers)
+    try:
+        status = request.query.get("status")
+        reports = await reports_manager.get_all(status=status)
+        return web.json_response({
+            "success": True,
+            "total": len(reports),
+            "reports": reports
+        }, headers=headers)
+    except Exception as e:
+        logger.error(f"Error handling GET /api/feedback: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500, headers=headers)
 
 
 async def handle_request_otp(request: web.Request) -> web.Response:
