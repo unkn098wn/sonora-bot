@@ -30,6 +30,28 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 from aiohttp import web
+import re
+import smtplib
+import urllib.request
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# Base paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Auto-load .env configuration
+_env_path = os.path.join(BASE_DIR, ".env")
+if os.path.isfile(_env_path):
+    try:
+        with open(_env_path, "r", encoding="utf-8") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _v = _line.split("=", 1)
+                    os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+    except Exception as _e:
+        pass
+
 
 # Configure logging
 logging.basicConfig(
@@ -193,6 +215,68 @@ class UserManager:
                 self._users[key]["login_count"] = self._users[key].get("login_count", 0) + 1
                 self._save_sync()
 
+
+    async def get_by_email(self, email: str) -> Optional[dict]:
+        clean = email.lower().strip()
+        async with self._lock:
+            for u in self._users.values():
+                if u.get("email", "").lower().strip() == clean:
+                    return u
+            return None
+
+    async def upsert_email_user(
+        self,
+        email: str,
+        display_name: str = "",
+        password_hash: Optional[str] = None,
+        salt: Optional[str] = None,
+    ) -> dict:
+        clean = email.lower().strip()
+        short_id = hashlib.sha256(clean.encode()).hexdigest()[:8]
+        key = f"email_{short_id}"
+        resolved_name = display_name.strip() or f"user_{short_id}"
+        async with self._lock:
+            if key in self._users:
+                u = self._users[key]
+                if display_name:
+                    u["display_name"] = resolved_name
+                if password_hash:
+                    u["password_hash"] = password_hash
+                if salt:
+                    u["salt"] = salt
+                u["last_login_at"] = datetime.utcnow().isoformat() + "Z"
+                self._save_sync()
+                return u
+            else:
+                user_record = {
+                    "user_id": key,
+                    "email": clean,
+                    "username": f"@user_{short_id}",
+                    "display_name": resolved_name,
+                    "provider": "email",
+                    "password_hash": password_hash,
+                    "salt": salt,
+                    "registered_at": datetime.utcnow().isoformat() + "Z",
+                    "last_login_at": datetime.utcnow().isoformat() + "Z",
+                    "login_count": 1,
+                }
+                self._users[key] = user_record
+                self._save_sync()
+                logger.info(f"Registered new email user: {resolved_name} ({clean})")
+                return user_record
+
+    async def set_email_password(self, email: str, password_hash: str, salt: Optional[str] = None) -> bool:
+        clean = email.lower().strip()
+        short_id = hashlib.sha256(clean.encode()).hexdigest()[:8]
+        key = f"email_{short_id}"
+        async with self._lock:
+            if key in self._users:
+                self._users[key]["password_hash"] = password_hash
+                if salt:
+                    self._users[key]["salt"] = salt
+                self._save_sync()
+                return True
+            return False
 
 user_manager = UserManager(USERS_DB_PATH)
 
@@ -505,6 +589,432 @@ async def handle_request_otp(request: web.Request) -> web.Response:
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
+
+# ==============================================================================
+# EMAIL SERVICE & EMAIL OTP MANAGER
+# ==============================================================================
+class EmailService:
+    """Universal SMTP Email Dispatcher with auto-detection for Gmail, Yandex, Mail.ru."""
+
+    def __init__(self):
+        self.host = os.getenv("SMTP_HOST", "").strip()
+        self.port = int(os.getenv("SMTP_PORT", "0") or "0")
+        self.user = os.getenv("SMTP_USER", "").strip()
+        self.password = os.getenv("SMTP_PASSWORD", "").strip()
+        self.from_name = os.getenv("SMTP_FROM_NAME", "Sonora Music").strip()
+        self.from_email = os.getenv("SMTP_FROM_EMAIL", "").strip() or self.user
+        self._auto_detect()
+
+    def _auto_detect(self):
+        if self.user and not self.host:
+            domain = self.user.split("@")[-1].lower() if "@" in self.user else ""
+            if "gmail.com" in domain:
+                self.host = "smtp.gmail.com"
+                self.port = 587
+            elif any(y in domain for y in ["yandex.ru", "ya.ru", "yandex.com"]):
+                self.host = "smtp.yandex.ru"
+                self.port = 465
+            elif any(m in domain for m in ["mail.ru", "inbox.ru", "bk.ru", "list.ru"]):
+                self.host = "smtp.mail.ru"
+                self.port = 465
+            elif any(o in domain for o in ["outlook.com", "hotmail.com"]):
+                self.host = "smtp.office365.com"
+                self.port = 587
+        if not self.port:
+            self.port = 465 if self.host and ("yandex" in self.host or "mail.ru" in self.host) else 587
+
+    def _send_sync(self, to_email: str, code: str) -> Tuple[bool, str]:
+        if not self.user or not self.password or not self.host:
+            logger.info(
+                f"\n" + "="*60 +
+                f"\n[DEMO EMAIL OTP] No SMTP password in .env." +
+                f"\nTarget Email: {to_email}" +
+                f"\nVerification Code: [{code}]" +
+                f"\nValid for 10 minutes." +
+                f"\n(To send real emails, enter SMTP credentials in Sonora-Telegram-Bot/.env)" +
+                f"\n" + "="*60
+            )
+            return True, f"Код подтверждения сгенерирован: {code} (демо-режим сервера)"
+
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"Sonora Music — Код подтверждения: {code}"
+            msg["From"] = f"{self.from_name} <{self.from_email}>"
+            msg["To"] = to_email
+
+            text_content = (
+                f"Здравствуйте!\n\n"
+                f"Ваш код подтверждения для входа в Sonora Music:\n"
+                f"{code}\n\n"
+                f"Код действителен в течение 10 минут.\n"
+                f"Если вы не запрашивали данный код, проигнорируйте это письмо.\n\n"
+                f"— Команда Sonora Music"
+            )
+            html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:28px 12px;background:#080A0E;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <div style="max-width:440px;margin:0 auto;background:#10131A;border:1px solid rgba(255,255,255,0.12);border-radius:24px;padding:36px 28px;text-align:center;box-shadow:0 24px 60px rgba(0,0,0,0.8);">
+    <div style="display:inline-block;width:56px;height:56px;line-height:56px;border-radius:18px;background:linear-gradient(135deg,#00E5FF,#0077FF);color:#FFFFFF;font-size:26px;font-weight:900;margin-bottom:16px;">S</div>
+    <h1 style="margin:0 0 6px 0;color:#FFFFFF;font-size:22px;font-weight:900;letter-spacing:4px;">SONORA</h1>
+    <p style="margin:0 0 24px 0;color:#8F96A3;font-size:13px;letter-spacing:0.4px;">Hi-Fi стриминг нового поколения</p>
+    
+    <div style="background:#06080C;border:1px solid rgba(0,229,255,0.35);border-radius:16px;padding:22px;margin-bottom:24px;">
+      <div style="color:#8F96A3;font-size:11px;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:8px;">Ваш код подтверждения</div>
+      <div style="color:#00E5FF;font-size:38px;font-weight:900;letter-spacing:12px;font-family:Consolas,Monaco,monospace;">{code}</div>
+    </div>
+    
+    <p style="margin:0 0 16px 0;color:#FFFFFF;font-size:13px;line-height:1.5;">Введите этот код в приложении Sonora для входа в свой аккаунт.</p>
+    <p style="margin:0;color:#6C7584;font-size:11.5px;line-height:1.4;">Срок действия: <b>10 минут</b>.<br>Если вы не отправляли запрос, просто проигнорируйте письмо.</p>
+  </div>
+</body>
+</html>"""
+            msg.attach(MIMEText(text_content, "plain", "utf-8"))
+            msg.attach(MIMEText(html_content, "html", "utf-8"))
+
+            if self.port == 465:
+                with smtplib.SMTP_SSL(self.host, self.port, timeout=12) as server:
+                    server.login(self.user, self.password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP(self.host, self.port, timeout=12) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.ehlo()
+                    server.login(self.user, self.password)
+                    server.send_message(msg)
+
+            logger.info(f"Successfully sent OTP email to {to_email} via {self.host}:{self.port}")
+            return True, "Письмо с кодом успешно отправлено на почту."
+        except Exception as e:
+            logger.error(f"Failed to send email to {to_email}: {e}")
+            return False, f"Ошибка отправки через SMTP ({e})."
+
+    async def send_otp(self, to_email: str, code: str) -> Tuple[bool, str]:
+        return await asyncio.to_thread(self._send_sync, to_email, code)
+
+
+email_service = EmailService()
+
+
+@dataclass
+class EmailOtpSession:
+    email: str
+    code: str
+    created_at: float
+    failed_attempts: int = 0
+    locked_until: float = 0.0
+
+    @property
+    def is_expired(self) -> bool:
+        return (time.time() - self.created_at) > 600.0  # 10 min TTL
+
+    @property
+    def is_locked(self) -> bool:
+        return time.time() < self.locked_until
+
+    @property
+    def cooldown_seconds(self) -> int:
+        elapsed = time.time() - self.created_at
+        return max(0, int(60.0 - elapsed))
+
+
+class EmailOtpManager:
+    """Manages 6-digit email OTP sessions with rate limits, lockouts and constant-time checks."""
+
+    def __init__(self):
+        self._sessions: Dict[str, EmailOtpSession] = {}
+        self._lock = asyncio.Lock()
+
+    async def create_or_refresh_otp(self, email: str) -> Tuple[bool, str, int, Optional[str]]:
+        clean_email = email.lower().strip()
+        async with self._lock:
+            existing = self._sessions.get(clean_email)
+            if existing and not existing.is_expired:
+                if existing.is_locked:
+                    rem = int(existing.locked_until - time.time())
+                    return False, f"Слишком много попыток. Подождите {rem} сек.", rem, None
+                if existing.cooldown_seconds > 0:
+                    return False, f"Код уже отправлен. Повторный запрос через {existing.cooldown_seconds} сек.", existing.cooldown_seconds, existing.code
+
+            # Generate 6-digit code
+            code = f"{secrets.randbelow(900000) + 100000}"
+            session = EmailOtpSession(
+                email=clean_email,
+                code=code,
+                created_at=time.time(),
+            )
+            self._sessions[clean_email] = session
+            return True, "Код сформирован", 60, code
+
+    async def verify_otp(self, email: str, input_code: str) -> Tuple[bool, str]:
+        clean_email = email.lower().strip()
+        clean_code = "".join(filter(str.isdigit, input_code.strip()))
+
+        async with self._lock:
+            session = self._sessions.get(clean_email)
+            if not session:
+                return False, "Код подтверждения не запрашивался или срок действия истёк."
+
+            if session.is_expired:
+                del self._sessions[clean_email]
+                return False, "Срок действия кода истёк. Запросите новый код."
+
+            if session.is_locked:
+                rem = int(session.locked_until - time.time())
+                return False, f"Превышено число попыток ввода. Подождите {rem} сек."
+
+            # Constant-time comparison
+            if secrets.compare_digest(session.code, clean_code):
+                del self._sessions[clean_email]
+                return True, "Код успешно подтверждён"
+            else:
+                session.failed_attempts += 1
+                if session.failed_attempts >= 5:
+                    session.locked_until = time.time() + 300.0  # 5 min lockout
+                    return False, "Неверный код. Аккаунт временно заблокирован на 5 минут из соображений безопасности."
+                rem_tries = 5 - session.failed_attempts
+                return False, f"Неверный код подтверждения. Осталось попыток: {rem_tries}"
+
+
+email_otp_manager = EmailOtpManager()
+
+
+class CloudflareTunnelManager:
+    """Spins up a lightweight trycloudflare tunnel for 100% remote phone reachability."""
+
+    def __init__(self, port: int, base_dir: str):
+        self.port = port
+        self.base_dir = base_dir
+        self.process = None
+        self.public_url = None
+        self._url_file = os.path.join(base_dir, "data", "public_url.txt")
+
+    async def start(self):
+        cloudflared_bin = os.path.join(self.base_dir, "cloudflared.exe")
+        if not os.path.isfile(cloudflared_bin):
+            cloudflared_bin = "cloudflared"
+
+        try:
+            cmd = [cloudflared_bin, "tunnel", "--url", f"http://127.0.0.1:{self.port}", "--no-autoupdate"]
+            self.process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            asyncio.create_task(self._read_tunnel_url())
+        except Exception as e:
+            logger.info(f"Cloudflare Tunnel not started (local mode active): {e}")
+
+    async def _read_tunnel_url(self):
+        pattern = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+        start_time = time.time()
+        while self.process and self.process.returncode is None and (time.time() - start_time < 30):
+            line_bytes = await self.process.stderr.readline()
+            if not line_bytes:
+                break
+            line = line_bytes.decode(errors="ignore")
+            m = pattern.search(line)
+            if m:
+                self.public_url = m.group(0)
+                logger.info(f"\n" + "="*60 +
+                            f"\n  SONORA PUBLIC HTTPS GATEWAY (Cloudflare Tunnel):" +
+                            f"\n  {self.public_url}" +
+                            f"\n  Mobile phones can now connect from anywhere worldwide!" +
+                            f"\n" + "="*60)
+                asyncio.create_task(self._publish_gateway_url(self.public_url))
+                break
+
+    async def _publish_gateway_url(self, url: str):
+        # 1. Save locally to data/public_url.txt
+        try:
+            os.makedirs(os.path.join(self.base_dir, "data"), exist_ok=True)
+            with open(self._url_file, "w", encoding="utf-8") as f:
+                f.write(url)
+        except Exception as e:
+            logger.debug(f"Failed to write public_url.txt: {e}")
+
+        # 2. Write to local website/assets directories if present
+        gateway_data = {
+            "gateway_url": url,
+            "status": "online",
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "description": "Sonora Music Live Public Gateway"
+        }
+        for candidate_dir in [
+            os.path.join(self.base_dir, "..", "Sonora-Website"),
+            os.path.join(self.base_dir, "..", "Sonora", "assets"),
+        ]:
+            if os.path.isdir(candidate_dir):
+                try:
+                    fpath = os.path.join(candidate_dir, "gateway.json")
+                    with open(fpath, "w", encoding="utf-8") as f:
+                        json.dump(gateway_data, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+
+        # 3. Publish to GitHub repo unkn098wn/sonora-website/gateway.json via GitHub API
+        github_token = os.getenv("GITHUB_TOKEN", "")
+        if not github_token:
+            token_file = os.path.join(self.base_dir, "data", "github_token.txt")
+            if os.path.isfile(token_file):
+                try:
+                    with open(token_file, "r", encoding="utf-8") as tf:
+                        github_token = tf.read().strip()
+                except Exception:
+                    pass
+        if not github_token:
+            return
+        repo = "unkn098wn/sonora-website"
+        path = "gateway.json"
+        api_url = f"https://api.github.com/repos/{repo}/contents/{path}"
+        try:
+            content_json = json.dumps(gateway_data, indent=2, ensure_ascii=False)
+            encoded = base64.b64encode(content_json.encode()).decode()
+            headers = {
+                "Authorization": f"token {github_token}",
+                "User-Agent": "Sonora-Bot-TunnelManager",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            sha = None
+            try:
+                get_req = urllib.request.Request(api_url, headers=headers)
+                with urllib.request.urlopen(get_req, timeout=5) as resp:
+                    resp_data = json.loads(resp.read().decode())
+                    sha = resp_data.get("sha")
+            except Exception:
+                pass
+
+            body = {
+                "message": f"chore: update live gateway URL to {url}",
+                "content": encoded
+            }
+            if sha:
+                body["sha"] = sha
+
+            put_req = urllib.request.Request(api_url, data=json.dumps(body).encode(), headers=headers, method="PUT")
+            with urllib.request.urlopen(put_req, timeout=6) as resp:
+                if resp.status in (200, 201):
+                    logger.info(f"Successfully published live gateway URL to GitHub: {url}")
+        except Exception as e:
+            logger.warning(f"Could not publish gateway URL to GitHub: {e}")
+
+
+tunnel_manager = CloudflareTunnelManager(HTTP_PORT, BASE_DIR)
+
+
+
+async def handle_send_email_otp(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        raw_email = str(data.get("email", "")).strip().lower()
+
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", raw_email):
+            return web.json_response({
+                "success": False,
+                "error": "Введите корректный адрес электронной почты (например, name@gmail.com)."
+            }, status=400)
+
+        success, msg, cooldown, code = await email_otp_manager.create_or_refresh_otp(raw_email)
+        if not success:
+            return web.json_response({"success": False, "error": msg, "cooldown": cooldown}, status=429)
+
+        # Dispatch email
+        send_ok, send_msg = await email_service.send_otp(raw_email, code)
+        if not send_ok:
+            return web.json_response({"success": False, "error": send_msg}, status=500)
+
+        return web.json_response({
+            "success": True,
+            "message": send_msg,
+            "email": raw_email,
+            "cooldown": cooldown,
+            "expires_in": 600,
+        })
+    except Exception as e:
+        logger.error(f"Error in handle_send_email_otp: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_verify_email_otp(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        raw_email = str(data.get("email", "")).strip().lower()
+        code = str(data.get("code", "")).strip()
+        display_name = str(data.get("display_name", "")).strip()
+        password_hash = data.get("password_hash")
+        salt = data.get("salt")
+
+        if not raw_email or not code:
+            return web.json_response({"success": False, "error": "Поля email и code обязательны."}, status=400)
+
+        is_valid, msg = await email_otp_manager.verify_otp(raw_email, code)
+        if not is_valid:
+            return web.json_response({"success": False, "verified": False, "error": msg}, status=401)
+
+        # Success! Create or update user in database
+        existing = await user_manager.get_by_email(raw_email)
+        is_new = existing is None
+        user = await user_manager.upsert_email_user(
+            email=raw_email,
+            display_name=display_name,
+            password_hash=password_hash,
+            salt=salt,
+        )
+
+        return web.json_response({
+            "success": True,
+            "verified": True,
+            "email": raw_email,
+            "user_id": user.get("user_id"),
+            "display_name": user.get("display_name"),
+            "username": user.get("username"),
+            "is_new_user": is_new,
+            "has_password": bool(user.get("password_hash")),
+            "message": "Почта успешно подтверждена!",
+        })
+    except Exception as e:
+        logger.error(f"Error in handle_verify_email_otp: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_set_password(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        raw_email = str(data.get("email", "")).strip().lower()
+        password_hash = str(data.get("password_hash", "")).strip()
+        salt = str(data.get("salt", "")).strip()
+
+        if not raw_email or not password_hash:
+            return web.json_response({"success": False, "error": "Поля email и password_hash обязательны."}, status=400)
+
+        ok = await user_manager.set_email_password(raw_email, password_hash, salt)
+        if ok:
+            return web.json_response({"success": True, "message": "Пароль успешно установлен."})
+        else:
+            return web.json_response({"success": False, "error": "Пользователь не найден."}, status=404)
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_public_endpoint(request: web.Request) -> web.Response:
+    url = tunnel_manager.public_url
+    if not url and os.path.isfile(tunnel_manager._url_file):
+        try:
+            with open(tunnel_manager._url_file, "r", encoding="utf-8") as f:
+                url = f.read().strip()
+        except Exception:
+            pass
+    return web.json_response({
+        "success": True,
+        "public_url": url,
+        "local_url": f"http://127.0.0.1:{HTTP_PORT}",
+    })
+
+
 async def handle_verify_otp(request: web.Request) -> web.Response:
     try:
         data = await request.json()
@@ -814,6 +1324,10 @@ def create_http_app() -> web.Application:
     # OTP Authentication
     app.router.add_post("/api/request-otp", handle_request_otp)
     app.router.add_post("/api/verify-otp", handle_verify_otp)
+    app.router.add_post("/api/send-email-otp", handle_send_email_otp)
+    app.router.add_post("/api/verify-email-otp", handle_verify_email_otp)
+    app.router.add_post("/api/set-password", handle_set_password)
+    app.router.add_get("/api/public-endpoint", handle_public_endpoint)
     # Avatars
     app.router.add_get("/api/avatar/{handle}", handle_serve_avatar)
     # Google OAuth Web Portal
@@ -1681,6 +2195,7 @@ async def main():
 
     # 1. Start Background Janitor
     asyncio.create_task(session_manager.background_janitor())
+    asyncio.create_task(tunnel_manager.start())
 
     # 2. Start HTTP server
     app = create_http_app()
