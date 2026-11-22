@@ -794,6 +794,20 @@ class CloudflareTunnelManager:
         self._url_file = os.path.join(base_dir, "data", "public_url.txt")
 
     async def start(self):
+        # 1. Cloud environment autodetection (Render, Koyeb, Railway, Custom Domain)
+        env_public = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("KOYEB_PUBLIC_DOMAIN") or os.getenv("PUBLIC_URL")
+        if env_public:
+            if not env_public.startswith("http"):
+                env_public = f"https://{env_public}"
+            self.public_url = env_public.rstrip("/")
+            logger.info(f"\n" + "="*60 +
+                        f"\n  SONORA CLOUD GATEWAY ACTIVE (Production Server):" +
+                        f"\n  {self.public_url}" +
+                        f"\n  Serving 24/7 in the cloud without local PC requirement!" +
+                        f"\n" + "="*60)
+            asyncio.create_task(self._publish_gateway_url(self.public_url))
+            return
+
         cloudflared_bin = os.path.join(self.base_dir, "cloudflared.exe")
         if not os.path.isfile(cloudflared_bin):
             cloudflared_bin = "cloudflared"
