@@ -2707,7 +2707,7 @@ async def run_telegram_bot():
                 await handle_user_command(message, text, reply_markup=get_profile_keyboard())
 
         @dp.message(Command("download", "app", "get"))
-        @dp.callback_query(F.data == "dl_menu")
+        @dp.callback_query(F.data.startswith("dl_"))
         async def on_download(event: types.TelegramObject):
             text = format_downloads_menu()
             if isinstance(event, types.CallbackQuery):
