@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 > nul
 title Push Sonora-Telegram-Bot to GitHub
 cls
 echo ===================================================
