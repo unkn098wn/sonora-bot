@@ -1038,6 +1038,96 @@ async def handle_playlist_youtube(request: web.Request) -> web.Response:
     if m:
         list_id = m.group(1)
 
+    # 1. Primary: Direct YouTube InnerTube Browse API (Frankfurt datacenter has unblocked access to YouTube)
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            payload = {
+                "context": {
+                    "client": {
+                        "clientName": "WEB",
+                        "clientVersion": "2.20241101.01.00",
+                        "hl": "ru",
+                        "gl": "US"
+                    }
+                },
+                "browseId": "VL" + list_id
+            }
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            }
+            async with session.post("https://www.youtube.com/youtubei/v1/browse?prettyPrint=false", json=payload, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    header = data.get("header", {})
+                    title = "YouTube Плейлист"
+                    if "pageHeaderRenderer" in header:
+                        title = header["pageHeaderRenderer"].get("pageTitle", title)
+                    elif "playlistHeaderRenderer" in header:
+                        title = header["playlistHeaderRenderer"].get("title", {}).get("simpleText", title)
+
+                    tracks = []
+                    seen = set()
+
+                    def walk(obj):
+                        if isinstance(obj, dict):
+                            if "lockupViewModel" in obj:
+                                lvm = obj["lockupViewModel"]
+                                vid = lvm.get("contentId")
+                                if vid and len(vid) == 11 and vid not in seen:
+                                    seen.add(vid)
+                                    meta = lvm.get("metadata", {}).get("lockupMetadataViewModel", {})
+                                    t = meta.get("title", {}).get("content", "")
+                                    if not t:
+                                        lbl = lvm.get("rendererContext", {}).get("accessibilityContext", {}).get("label", "")
+                                        t = lbl.split(" 2 минуты")[0].split(" 3 минуты")[0]
+                                    art = "YouTube"
+                                    rows = meta.get("metadata", {}).get("contentMetadataViewModel", {}).get("metadataRows", [])
+                                    if rows and isinstance(rows, list):
+                                        parts = rows[0].get("metadataParts", [])
+                                        if parts and "text" in parts[0]:
+                                            art = parts[0]["text"].get("content", "YouTube")
+                                    tracks.append({
+                                        "id": vid,
+                                        "videoId": vid,
+                                        "title": t,
+                                        "artist": art,
+                                        "durationSeconds": 180,
+                                        "artworkUrl": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                                    })
+                            elif "playlistVideoRenderer" in obj:
+                                pvr = obj["playlistVideoRenderer"]
+                                vid = pvr.get("videoId")
+                                if vid and vid not in seen:
+                                    seen.add(vid)
+                                    t = pvr.get("title", {}).get("runs", [{}])[0].get('text', '') or pvr.get("title", {}).get("simpleText", "")
+                                    art = pvr.get("shortBylineText", {}).get("runs", [{}])[0].get('text', '') or "YouTube"
+                                    tracks.append({
+                                        "id": vid,
+                                        "videoId": vid,
+                                        "title": t,
+                                        "artist": art,
+                                        "durationSeconds": 180,
+                                        "artworkUrl": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                                    })
+                            for v in obj.values():
+                                walk(v)
+                        elif isinstance(obj, list):
+                            for i in obj:
+                                walk(i)
+
+                    walk(data)
+                    if tracks:
+                        return web.json_response({
+                            "success": True,
+                            "title": title,
+                            "tracks": tracks
+                        })
+    except Exception as e:
+        logger.warning(f"Direct InnerTube failed for {list_id}: {e}")
+
+    # 2. Fallback: Invidious Instances
     instances = [
         "https://inv.nadeko.net",
         "https://invidious.jing.rocks",
