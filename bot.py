@@ -1029,6 +1029,55 @@ async def handle_public_endpoint(request: web.Request) -> web.Response:
     })
 
 
+async def handle_playlist_youtube(request: web.Request) -> web.Response:
+    list_id = request.query.get("list_id", "").strip()
+    if not list_id:
+        return web.json_response({"success": False, "error": "Параметр list_id обязателен"}, status=400)
+
+    m = re.search(r"[?&]list=([a-zA-Z0-9_-]+)", list_id)
+    if m:
+        list_id = m.group(1)
+
+    instances = [
+        "https://inv.nadeko.net",
+        "https://invidious.jing.rocks",
+        "https://invidious.nerdvpn.de",
+        "https://yewtu.be",
+        "https://vid.puffyan.us"
+    ]
+    for inst in instances:
+        try:
+            timeout = aiohttp.ClientTimeout(total=6)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{inst}/api/v1/playlists/{list_id}", headers={"User-Agent": "Mozilla/5.0"}) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        videos = data.get("videos", [])
+                        if videos:
+                            tracks = []
+                            for v in videos:
+                                vid = v.get("videoId")
+                                title = v.get("title")
+                                if vid and title:
+                                    tracks.append({
+                                        "id": vid,
+                                        "videoId": vid,
+                                        "title": title,
+                                        "artist": v.get("author", "YouTube"),
+                                        "durationSeconds": v.get("lengthSeconds", 180),
+                                        "artworkUrl": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                                    })
+                            return web.json_response({
+                                "success": True,
+                                "title": data.get("title", "YouTube Плейлист"),
+                                "tracks": tracks
+                            })
+        except Exception:
+            continue
+
+    return web.json_response({"success": False, "error": "Не удалось загрузить плейлист с серверов YouTube"}, status=502)
+
+
 async def handle_verify_otp(request: web.Request) -> web.Response:
     try:
         data = await request.json()
@@ -1342,6 +1391,8 @@ def create_http_app() -> web.Application:
     app.router.add_post("/api/verify-email-otp", handle_verify_email_otp)
     app.router.add_post("/api/set-password", handle_set_password)
     app.router.add_get("/api/public-endpoint", handle_public_endpoint)
+    # Playlist Importer Cloud Proxy
+    app.router.add_get("/api/playlist/youtube", handle_playlist_youtube)
     # Avatars
     app.router.add_get("/api/avatar/{handle}", handle_serve_avatar)
     # Google OAuth Web Portal
