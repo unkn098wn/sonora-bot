@@ -280,6 +280,42 @@ class UserManager:
                 return True
             return False
 
+    async def link_email_to_user(self, user_id: str, email: str) -> dict:
+        clean = email.lower().strip()
+        async with self._lock:
+            target_key = None
+            clean_id = user_id.replace("tg_", "").replace("email_", "")
+            for k, u in self._users.items():
+                if k == user_id or str(u.get("telegram_id")) == clean_id or u.get("user_id") == user_id:
+                    target_key = k
+                    break
+            if not target_key and user_id in self._users:
+                target_key = user_id
+            if target_key:
+                self._users[target_key]["email"] = clean
+                self._users[target_key]["linked_email"] = clean
+                self._save_sync()
+                return self._users[target_key]
+            return await self.upsert_email_user(clean)
+
+    async def link_telegram_to_user(self, user_id: str, handle: str) -> dict:
+        clean_handle = handle.lstrip("@").lower().strip()
+        async with self._lock:
+            target_key = None
+            clean_id = user_id.replace("tg_", "").replace("email_", "")
+            for k, u in self._users.items():
+                if k == user_id or str(u.get("telegram_id")) == clean_id or u.get("user_id") == user_id or u.get("email") == user_id:
+                    target_key = k
+                    break
+            if not target_key and user_id in self._users:
+                target_key = user_id
+            if target_key:
+                self._users[target_key]["username"] = clean_handle
+                self._users[target_key]["linked_telegram"] = f"@{clean_handle}"
+                self._save_sync()
+                return self._users[target_key]
+            return {}
+
 user_manager = UserManager(USERS_DB_PATH)
 
 
@@ -1038,6 +1074,120 @@ async def handle_public_endpoint(request: web.Request) -> web.Response:
     })
 
 
+async def handle_link_email(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        raw_email = str(data.get("email", "")).strip().lower()
+        user_id = str(data.get("user_id", "")).strip()
+
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", raw_email):
+            return web.json_response({
+                "success": False,
+                "error": "Введите корректный адрес электронной почты."
+            }, status=400)
+
+        success, msg, cooldown, code = await email_otp_manager.create_or_refresh_otp(raw_email)
+        if not success:
+            return web.json_response({"success": False, "error": msg, "cooldown": cooldown}, status=429)
+
+        send_ok, send_msg = await email_service.send_otp(raw_email, code)
+        return web.json_response({
+            "success": True,
+            "message": send_msg if send_ok else f"Код подтверждения: {code}",
+            "email": raw_email,
+            "cooldown": cooldown,
+        })
+    except Exception as e:
+        logger.error(f"Error in handle_link_email: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_link_telegram(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        handle = str(data.get("telegram_handle", "")).lstrip("@").strip()
+        user_id = str(data.get("user_id", "")).strip()
+
+        if not handle:
+            return web.json_response({"success": False, "error": "Укажите имя пользователя Telegram."}, status=400)
+
+        success, msg, cooldown, code = await otp_manager.create_or_refresh_session(handle)
+        if not success:
+            return web.json_response({"success": False, "error": msg, "cooldown": cooldown}, status=429)
+
+        return web.json_response({
+            "success": True,
+            "message": "Код сгенерирован. Откройте @sonoramus1c_bot и нажмите «Получить код входа».",
+            "cooldown": cooldown,
+        })
+    except Exception as e:
+        logger.error(f"Error in handle_link_telegram: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_verify_link(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+        user_id = str(data.get("user_id", "")).strip()
+        link_type = str(data.get("type", "")).strip().lower()
+        target = str(data.get("target", "")).strip()
+        code = str(data.get("code", "")).strip()
+
+        if not user_id or not target or not code:
+            return web.json_response({"success": False, "verified": False, "error": "Заполните все поля."}, status=400)
+
+        if link_type == "email":
+            clean_email = target.lower()
+            is_valid, msg = await email_otp_manager.verify_otp(clean_email, code)
+            if not is_valid:
+                return web.json_response({"success": False, "verified": False, "error": msg}, status=401)
+            user = await user_manager.link_email_to_user(user_id, clean_email)
+            return web.json_response({
+                "success": True,
+                "verified": True,
+                "message": "Почта успешно привязана к аккаунту!",
+                "linked_email": clean_email,
+            })
+        elif link_type == "telegram":
+            clean_handle = target.lstrip("@").lower()
+            is_valid, msg = await otp_manager.verify_otp(clean_handle, code)
+            if not is_valid:
+                return web.json_response({"success": False, "verified": False, "error": msg}, status=401)
+            user = await user_manager.link_telegram_to_user(user_id, clean_handle)
+            return web.json_response({
+                "success": True,
+                "verified": True,
+                "message": "Telegram успешно привязан к аккаунту!",
+                "linked_telegram": f"@{clean_handle}",
+            })
+        else:
+            return web.json_response({"success": False, "verified": False, "error": "Неизвестный тип привязки."}, status=400)
+    except Exception as e:
+        logger.error(f"Error in handle_verify_link: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_version(request: web.Request) -> web.Response:
+    return web.json_response({
+        "version": "2.6.0",
+        "build_number": 26,
+        "tag_name": "v2.6.0",
+        "release_notes": "Sonora 2.6.0: Синхронизация звука с Android, стабильный seek, умный shuffle, 10-полосный эквалайзер и DSP, единый профиль (Email + Telegram), кнопка дизлайка, жанровые фильтры Моей Волны, категории поиска, добавление и обновление плейлистов, HD-обложки, плавные тексты песен, Shazam.",
+        "download_url_windows": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Setup.exe",
+        "download_url_android": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Android.apk",
+        "assets": [
+            {
+                "name": "Sonora-v2.6.0-Setup.exe",
+                "browser_download_url": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Setup.exe"
+            },
+            {
+                "name": "Sonora-v2.6.0-Android.apk",
+                "browser_download_url": "https://sonora-music.pages.dev/downloads/Sonora-v2.6.0-Android.apk"
+            }
+        ]
+    })
+
+
 async def handle_playlist_youtube(request: web.Request) -> web.Response:
     list_id = request.query.get("list_id", "").strip()
     if not list_id:
@@ -1506,12 +1656,16 @@ def create_http_app() -> web.Application:
     app.router.add_get("/", handle_health)
     # Health & Check
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/api/version", handle_version)
     app.router.add_get("/api/check-user", handle_check_user)
-    # OTP Authentication
+    # OTP Authentication & Account Linking
     app.router.add_post("/api/request-otp", handle_request_otp)
     app.router.add_post("/api/verify-otp", handle_verify_otp)
     app.router.add_post("/api/send-email-otp", handle_send_email_otp)
     app.router.add_post("/api/verify-email-otp", handle_verify_email_otp)
+    app.router.add_post("/api/account/link-email", handle_link_email)
+    app.router.add_post("/api/account/link-telegram", handle_link_telegram)
+    app.router.add_post("/api/account/verify-link", handle_verify_link)
     app.router.add_post("/api/set-password", handle_set_password)
     app.router.add_get("/api/public-endpoint", handle_public_endpoint)
     # Playlist Importer Cloud Proxy

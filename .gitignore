@@ -6,10 +6,8 @@ __pycache__/
 .idea/
 .vscode/
 # Exclude files exceeding GitHub's 100MB limit
-downloads/*Universal*.apk
+downloads/
 cloudflared.exe
 *.exe
 data/public_url.txt
 data/github_token.txt
-downloads/Sonora-*-arm*.apk
-downloads/Sonora-*-x86*.apk
