@@ -516,6 +516,13 @@ async def handle_health(request: Optional[web.Request] = None) -> web.Response:
     })
 
 
+def get_public_base_url() -> str:
+    env_pub = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("PUBLIC_URL") or "https://sonora-bot.onrender.com"
+    if not env_pub.startswith("http"):
+        env_pub = f"https://{env_pub}"
+    return env_pub.rstrip("/")
+
+
 async def handle_check_user(request: web.Request) -> web.Response:
     """Checks whether a username or telegram ID is registered in Sonora."""
     handle = request.query.get("handle", "").strip()
@@ -533,7 +540,7 @@ async def handle_check_user(request: web.Request) -> web.Response:
             "registered": True,
             "handle": f"@{user['username']}" if user.get("username") else "",
             "display_name": user.get("display_name", ""),
-            "avatar_url": f"http://127.0.0.1:{HTTP_PORT}/api/avatar/{clean_handle}",
+            "avatar_url": f"{get_public_base_url()}/api/avatar/{clean_handle}",
             "registered_at": user.get("registered_at"),
         })
     else:
@@ -1207,7 +1214,7 @@ async def handle_verify_otp(request: web.Request) -> web.Response:
                     asyncio.create_task(send_telegram_login_alert(tg_id, clean_handle))
 
             avatar_file = user.get("avatar_file")
-            avatar_url = f"http://127.0.0.1:{HTTP_PORT}/api/avatar/{clean_handle}"
+            avatar_url = f"{get_public_base_url()}/api/avatar/{clean_handle}"
 
             return web.json_response({
                 "success": True,
@@ -1248,7 +1255,7 @@ async def send_telegram_login_alert(tg_id: int, handle: str):
 
 
 async def handle_serve_avatar(request: web.Request) -> web.Response:
-    """Serves the user's avatar image, or a high-res SVG letter badge if not set."""
+    """Serves the user's avatar image as JPEG, with on-demand Telegram fetch and JPEG fallback."""
     handle = request.match_info.get("handle", "").strip().lower().lstrip("@")
     user = await user_manager.get_by_handle(handle)
 
@@ -1256,27 +1263,49 @@ async def handle_serve_avatar(request: web.Request) -> web.Response:
     if not user and handle.isdigit():
         user = await user_manager.get_by_telegram_id(int(handle))
 
-    if user and user.get("avatar_file"):
-        path = os.path.join(AVATARS_DIR, user["avatar_file"])
-        if os.path.isfile(path):
-            return web.FileResponse(path, headers={
-                "Content-Type": "image/jpeg",
-                "Cache-Control": "public, max-age=86400",
-            })
+    if user:
+        avatar_file = user.get("avatar_file")
+        if avatar_file:
+            path = os.path.join(AVATARS_DIR, avatar_file)
+            if os.path.isfile(path):
+                return web.FileResponse(path, headers={
+                    "Content-Type": "image/jpeg",
+                    "Cache-Control": "public, max-age=86400",
+                })
+        
+        # On-demand download from Telegram if not cached on disk
+        tg_id = user.get("telegram_id")
+        if tg_id and active_bot_instance:
+            try:
+                new_av = await download_telegram_avatar(active_bot_instance, tg_id)
+                if new_av:
+                    new_path = os.path.join(AVATARS_DIR, new_av)
+                    if os.path.isfile(new_path):
+                        user["avatar_file"] = new_av
+                        return web.FileResponse(new_path, headers={
+                            "Content-Type": "image/jpeg",
+                            "Cache-Control": "public, max-age=86400",
+                        })
+            except Exception as e:
+                logger.warning(f"On-demand avatar fetch error for {handle}: {e}")
 
-    # Fallback to high-res dynamic SVG avatar
-    letter = (user.get("display_name") if user else handle)[:1].upper() or "S"
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-      <defs>
-        <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#2AABEE"/>
-          <stop offset="100%" stop-color="#229ED9"/>
-        </linearGradient>
-      </defs>
-      <circle cx="128" cy="128" r="128" fill="url(#bg)"/>
-      <text x="128" y="160" font-size="110" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-weight="900" fill="#FFFFFF" text-anchor="middle">{letter}</text>
-    </svg>"""
-    return web.Response(text=svg, content_type="image/svg+xml")
+    # Guaranteed JPEG fallback so Flutter Image.network and CachedNetworkImage always render
+    try:
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (256, 256), color=(15, 17, 22))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse([8, 8, 248, 248], fill=(0, 229, 255))
+        draw.ellipse([32, 32, 224, 224], fill=(15, 17, 22))
+        draw.ellipse([96, 96, 160, 160], fill=(0, 229, 255))
+        import io
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        return web.Response(body=buf.getvalue(), content_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
+    except Exception:
+        # Minimal 1x1 JPEG fallback
+        import base64
+        tiny_jpeg = base64.b64decode('/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////wgALCAABAAEBAREA/8QAFBABAAAAAAAAAAAAAAAAAAAAAP/aAAgBAQABPxA=')
+        return web.Response(body=tiny_jpeg, content_type="image/jpeg")
 
 
 # ==============================================================================
