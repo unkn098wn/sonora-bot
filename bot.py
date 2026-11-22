@@ -125,7 +125,8 @@ class UserManager:
         async with self._lock:
             for u in self._users.values():
                 h = u.get("username", "").lower().lstrip("@")
-                if h and h == clean:
+                lt = u.get("linked_telegram", "").lower().lstrip("@")
+                if (h and h == clean) or (lt and lt == clean):
                     return u
             return None
 
@@ -222,7 +223,7 @@ class UserManager:
         clean = email.lower().strip()
         async with self._lock:
             for u in self._users.values():
-                if u.get("email", "").lower().strip() == clean:
+                if u.get("email", "").lower().strip() == clean or u.get("linked_email", "").lower().strip() == clean:
                     return u
             return None
 
@@ -234,38 +235,48 @@ class UserManager:
         salt: Optional[str] = None,
     ) -> dict:
         clean = email.lower().strip()
-        short_id = hashlib.sha256(clean.encode()).hexdigest()[:8]
-        key = f"email_{short_id}"
-        resolved_name = display_name.strip() or f"user_{short_id}"
         async with self._lock:
-            if key in self._users:
-                u = self._users[key]
+            existing_key = None
+            for k, u in self._users.items():
+                if u.get("email", "").lower().strip() == clean or u.get("linked_email", "").lower().strip() == clean:
+                    existing_key = k
+                    break
+
+            if existing_key:
+                u = self._users[existing_key]
                 if display_name:
-                    u["display_name"] = resolved_name
+                    u["display_name"] = display_name.strip()
                 if password_hash:
                     u["password_hash"] = password_hash
                 if salt:
                     u["salt"] = salt
                 u["last_login_at"] = datetime.utcnow().isoformat() + "Z"
+                u["login_count"] = u.get("login_count", 0) + 1
+                if not u.get("user_id"):
+                    u["user_id"] = existing_key if existing_key.startswith(("tg_", "email_")) else f"tg_{existing_key}"
                 self._save_sync()
                 return u
-            else:
-                user_record = {
-                    "user_id": key,
-                    "email": clean,
-                    "username": f"@user_{short_id}",
-                    "display_name": resolved_name,
-                    "provider": "email",
-                    "password_hash": password_hash,
-                    "salt": salt,
-                    "registered_at": datetime.utcnow().isoformat() + "Z",
-                    "last_login_at": datetime.utcnow().isoformat() + "Z",
-                    "login_count": 1,
-                }
-                self._users[key] = user_record
-                self._save_sync()
-                logger.info(f"Registered new email user: {resolved_name} ({clean})")
-                return user_record
+
+            short_id = hashlib.sha256(clean.encode()).hexdigest()[:8]
+            key = f"email_{short_id}"
+            resolved_name = display_name.strip() or f"user_{short_id}"
+            user_record = {
+                "user_id": key,
+                "email": clean,
+                "linked_email": clean,
+                "username": f"@user_{short_id}",
+                "display_name": resolved_name,
+                "provider": "email",
+                "password_hash": password_hash,
+                "salt": salt,
+                "registered_at": datetime.utcnow().isoformat() + "Z",
+                "last_login_at": datetime.utcnow().isoformat() + "Z",
+                "login_count": 1,
+            }
+            self._users[key] = user_record
+            self._save_sync()
+            logger.info(f"Registered new email user: {resolved_name} ({clean})")
+            return user_record
 
     async def set_email_password(self, email: str, password_hash: str, salt: Optional[str] = None) -> bool:
         clean = email.lower().strip()
@@ -1024,11 +1035,14 @@ async def handle_verify_email_otp(request: web.Request) -> web.Response:
             salt=salt,
         )
 
+        canonical_user_id = user.get("user_id") or (f"tg_{user.get('telegram_id')}" if user.get("telegram_id") else f"email_{hashlib.sha256(raw_email.encode()).hexdigest()[:8]}")
         return web.json_response({
             "success": True,
             "verified": True,
+            "user_id": canonical_user_id,
             "email": raw_email,
-            "user_id": user.get("user_id"),
+            "linked_email": raw_email,
+            "linked_telegram": user.get("linked_telegram") or (f"@{user.get('username')}".replace("@@", "@") if user.get("username") else None),
             "display_name": user.get("display_name"),
             "username": user.get("username"),
             "is_new_user": is_new,
@@ -1365,16 +1379,20 @@ async def handle_verify_otp(request: web.Request) -> web.Response:
 
             avatar_file = user.get("avatar_file")
             avatar_url = f"{get_public_base_url()}/api/avatar/{clean_handle}"
+            canonical_user_id = user.get("user_id") or (f"tg_{tg_id}" if tg_id else f"tg_{clean_handle}")
 
             return web.json_response({
                 "success": True,
                 "verified": True,
+                "user_id": canonical_user_id,
                 "handle": f"@{clean_handle}",
                 "telegram_id": tg_id,
                 "first_name": user.get("first_name", ""),
                 "display_name": user.get("display_name", clean_handle),
                 "avatar_url": avatar_url,
                 "has_avatar": bool(avatar_file),
+                "linked_email": user.get("linked_email") or user.get("email"),
+                "linked_telegram": f"@{clean_handle}",
                 "message": "Успешная авторизация в Sonora Music",
             })
         else:
@@ -1743,10 +1761,26 @@ CAPTION_PORTABLE = (
     "💡 <i>Инструкция: Распакуйте zip-архив в любую удобную папку и запустите sonora.exe.</i>"
 )
 
-CAPTION_APK_ARM64 = (
-    "📱 <b>Sonora Music v2.6.0 — Android APK (Мобильная версия)</b>\n"
+CAPTION_APK_UNIVERSAL = (
+    "📱 <b>Sonora Music v2.6.0 — Universal Android APK</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "🎯 <b>Назначение:</b> Официальное мобильное приложение Sonora для Android.\n"
+    "🎯 <b>Назначение:</b> Единый универсальный установочный пакет для всех устройств Android.\n"
+    "📱 <b>Платформа:</b> Android 7.0–15 (поддержка ARM64, ARMv7, x86, x86_64)\n"
+    "📦 <b>Размер:</b> 138.6 МБ\n\n"
+    "⚡ <b>Особенности и преимущества:</b>\n"
+    "• Подходит абсолютно для любых смартфонов, планшетов, Android TV и эмуляторов\n"
+    "• Фоновое воспроизведение музыки без ограничений и рекламы\n"
+    "• Адаптивная неоновая иконка в стиле Obsidian Stage\n"
+    "• Синхронизация системной громкости со шторкой Android\n"
+    "• Shazam распознавание треков через микрофон\n"
+    "• 18 музыкальных сервисов, текст песен в реальном времени\n\n"
+    "💡 <i>Инструкция: Скачайте файл и нажмите «Установить». Если смартфон запросит разрешение на установку — нажмите «Разрешить».</i>"
+)
+
+CAPTION_APK_ARM64 = (
+    "📱 <b>Sonora Music v2.6.0 — Android APK (Мобильная версия ARM64)</b>\n"
+    "━━━━━━━━━━━━━━━━━━━━━━\n"
+    "🎯 <b>Назначение:</b> Облегченное мобильное приложение Sonora для Android.\n"
     "📱 <b>Платформа:</b> Android 7.0–15 (Архитектура ARM64 — 99% всех смартфонов)\n"
     "📦 <b>Размер:</b> 45.36 МБ <i>(прямая загрузка файлом в Telegram!)</i>\n\n"
     "⚡ <b>Особенности и преимущества:</b>\n"
@@ -1818,12 +1852,12 @@ def format_downloads_menu() -> str:
     return (
         "📦 <b>Загрузки Sonora Music v2.6.0 Obsidian Stage:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Выберите нужный дистрибутив — бот отправит установочный файл <b>прямо сюда в чат Telegram</b> (без внешних сайтов и ссылок):\n\n"
-        "• 💻 <b>Windows Setup (.exe, 27.8 МБ)</b> — Официальный установщик в 1 клик для Windows 10/11\n"
-        "• ⚡ <b>Windows Portable (.zip, 35.7 МБ)</b> — Портативная версия без инсталляции в систему\n"
-        "• 📱 <b>Android APK (.apk, 45.4 МБ)</b> — Мобильное приложение (ARM64 — 99% смартфонов)\n"
-        "• 📱 <b>Android APK ARMv7 (.apk, 42.5 МБ)</b> — Для старых 32-битных устройств\n\n"
-        "<i>Нажмите кнопку ниже, чтобы получить файл в чат:</i>"
+        "Выберите нужный официальный дистрибутив:\n\n"
+        "• 💻 <b>Windows Setup (.exe, 28.5 МБ)</b> — Официальный установщик в 1 клик для Windows 10/11\n"
+        "• 📱 <b>Universal Android APK (.apk, 138 МБ)</b> — Единый универсальный APK для всех Android устройств\n"
+        "• 📱 <b>Android APK в чат (.apk, 45.4 МБ)</b> — Легковесная ARM64 версия файлом прямо в Telegram\n"
+        "• ⚡ <b>Windows Portable (.zip, 35.7 МБ)</b> — Портативная версия без инсталляции в систему\n\n"
+        "<i>Нажмите кнопку ниже, чтобы получить файл или ссылку:</i>"
     )
 
 
@@ -1978,14 +2012,20 @@ async def run_telegram_bot():
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="📦 Получить ВСЕ файлы сразу (Пакет)",
-                            callback_data="send_all",
+                            text="💻 Windows Setup (.exe, 28.5 МБ)",
+                            callback_data="send_setup",
                         ),
                     ],
                     [
                         InlineKeyboardButton(
-                            text="💻 Windows Setup (.exe, 27.8 МБ)",
-                            callback_data="send_setup",
+                            text="📱 Universal Android APK (.apk, 138 МБ)",
+                            callback_data="send_apk",
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="📱 Android APK в чат (ARM64, 45.4 МБ)",
+                            callback_data="send_apk_arm64",
                         ),
                     ],
                     [
@@ -1996,14 +2036,8 @@ async def run_telegram_bot():
                     ],
                     [
                         InlineKeyboardButton(
-                            text="📱 Android APK (ARM64, 45.4 МБ)",
-                            callback_data="send_apk_arm64",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="📱 Android APK (ARMv7 32-bit, 42.5 МБ)",
-                            callback_data="send_apk_armv7",
+                            text="🌐 Официальный сайт Sonora",
+                            url="https://sonora-music.pages.dev",
                         ),
                     ],
                     [
@@ -2114,6 +2148,28 @@ async def run_telegram_bot():
                 await callback.answer(f"⚠️ Файл {filename} не найден на сервере", show_alert=True)
                 return
 
+            size_bytes = os.path.getsize(file_path)
+            # Telegram Bot API standard file upload limit is 50 MB (52,428,800 bytes)
+            if size_bytes >= 49 * 1024 * 1024:
+                direct_url = f"https://sonora-music.pages.dev/downloads/{filename}"
+                gh_url = f"https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/{filename}"
+                mb_size = round(size_bytes / (1024 * 1024), 1)
+                text = (
+                    f"{caption}\n\n"
+                    f"⚠️ <b>Размер файла ({mb_size} МБ) превышает лимит отправки через Telegram бота (50 МБ).</b>\n\n"
+                    f"🚀 Скачайте файл по прямой ссылке с максимальной скоростью:"
+                )
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text=f"⬇️ Скачать {filename} ({mb_size} МБ)", url=direct_url)],
+                        [InlineKeyboardButton(text="🐙 Зеркало на GitHub Releases", url=gh_url)],
+                        [InlineKeyboardButton(text="◀️ Меню загрузок", callback_data="dl_menu")],
+                    ]
+                )
+                await callback.message.answer(text, reply_markup=kb)
+                await callback.answer()
+                return
+
             await callback.answer(f"⏳ Отправка {filename}...")
             chat_id = callback.message.chat.id
             status_msg = None
@@ -2127,6 +2183,14 @@ async def run_telegram_bot():
                 await callback.answer("✅ Файл успешно отправлен в чат!")
             except Exception as e:
                 logger.error(f"Error sending document {filename}: {e}")
+                direct_url = f"https://sonora-music.pages.dev/downloads/{filename}"
+                kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text=f"⬇️ Скачать {filename} по прямой ссылке", url=direct_url)],
+                        [InlineKeyboardButton(text="◀️ Меню загрузок", callback_data="dl_menu")],
+                    ]
+                )
+                await callback.message.answer(f"⚠️ Не удалось передать файл напрямую в чат ({e}).\n\nВы можете скачать его по прямой ссылке:", reply_markup=kb)
                 await callback.answer(f"⚠️ Ошибка отправки файла: {e}", show_alert=True)
             finally:
                 if status_msg:
@@ -2436,13 +2500,24 @@ async def run_telegram_bot():
                 loading_text="⏳ <i>Загружаем портативную версию Sonora Portable в Telegram... Пожалуйста, подождите.</i>",
             )
 
-        @dp.callback_query(F.data.in_({"send_apk_arm64", "send_apk"}))
+        @dp.callback_query(F.data == "send_apk")
+        async def on_send_apk_universal(callback: types.CallbackQuery):
+            path = find_download_file("Sonora-v2.6.0-Android.apk") or find_download_file("Sonora-v2.6.0-Android-Universal.apk") or find_download_file("Sonora-v2.6.0-Android-Universal-Release.apk")
+            await send_file_with_cleanup(
+                callback=callback,
+                file_path=path,
+                filename="Sonora-v2.6.0-Android.apk",
+                caption=CAPTION_APK_UNIVERSAL,
+                loading_text="⏳ <i>Подготовка Universal Android APK (138 МБ)... Пожалуйста, подождите.</i>",
+            )
+
+        @dp.callback_query(F.data == "send_apk_arm64")
         async def on_send_apk_arm64(callback: types.CallbackQuery):
             path = find_download_file("Sonora-v2.6.0-Android-ARM64.apk") or find_download_file("Sonora-v2.6.0-Android.apk")
             await send_file_with_cleanup(
                 callback=callback,
                 file_path=path,
-                filename="Sonora-v2.6.0-Android.apk",
+                filename="Sonora-v2.6.0-Android-ARM64.apk",
                 caption=CAPTION_APK_ARM64,
                 loading_text="⏳ <i>Загружаем Android APK в Telegram (45.4 МБ)... Пожалуйста, подождите.</i>",
             )
@@ -2466,7 +2541,7 @@ async def run_telegram_bot():
             try:
                 status_msg = await callback.message.answer(
                     "📦 <b>Отправка полного пакета дистрибутивов Sonora:</b>\n"
-                    "<i>Пожалуйста, подождите, бот отправляет 3 официальных файла подряд в чат...</i>"
+                    "<i>Пожалуйста, подождите, бот отправляет официальные файлы в чат...</i>"
                 )
 
                 # 1. Windows Setup
@@ -2487,16 +2562,16 @@ async def run_telegram_bot():
                         caption=CAPTION_PORTABLE,
                     )
 
-                # 3. Android APK (ARM64)
-                apk_path = find_download_file("Sonora-v2.6.0-Android-ARM64.apk") or find_download_file("Sonora-v2.6.0-Android.apk")
-                if apk_path:
+                # 3. Android APK (ARM64 fits Telegram 50MB limit)
+                apk_path = find_download_file("Sonora-v2.6.0-Android-ARM64.apk")
+                if apk_path and os.path.getsize(apk_path) < 49 * 1024 * 1024:
                     await bot.send_chat_action(chat_id=chat_id, action="upload_document")
                     await callback.message.answer_document(
-                        FSInputFile(apk_path, filename="Sonora-v2.6.0-Android.apk"),
+                        FSInputFile(apk_path, filename="Sonora-v2.6.0-Android-ARM64.apk"),
                         caption=CAPTION_APK_ARM64,
                     )
 
-                await callback.answer("🎉 Все 3 дистрибутива успешно отправлены в чат!", show_alert=True)
+                await callback.answer("🎉 Официальные дистрибутивы успешно отправлены в чат!", show_alert=True)
             except Exception as e:
                 logger.error(f"Error in on_send_all: {e}")
                 await callback.answer(f"⚠️ Ошибка при отправке пакета: {e}", show_alert=True)
