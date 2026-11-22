@@ -68,8 +68,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 AVATARS_DIR = os.path.join(BASE_DIR, "avatars")
 USERS_DB_PATH = os.path.join(DATA_DIR, "users.json")
+LIBRARIES_DIR = os.path.join(DATA_DIR, "libraries")
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(AVATARS_DIR, exist_ok=True)
+os.makedirs(LIBRARIES_DIR, exist_ok=True)
 
 # Configuration
 BOT_TOKEN = os.getenv("SONORA_BOT_TOKEN", "9127762870:AAHJXJL9EADvRAeTh8zdblhBbbjLxvBtPgU").strip()
@@ -597,6 +599,102 @@ async def handle_check_user(request: web.Request) -> web.Response:
             "handle": f"@{clean_handle}",
             "message": "Пользователь не зарегистрирован в Sonora. Требуется регистрация через бота.",
         })
+
+
+async def handle_library_sync_get(request: web.Request) -> web.Response:
+    """Fetches user library (playlists and favorites) from local persistent store or Cloudflare KV."""
+    account_id = request.query.get("account_id") or request.query.get("user_id") or ""
+    account_id = account_id.strip()
+    if not account_id:
+        return web.json_response({"success": False, "error": "Missing account_id parameter"}, status=400)
+
+    clean_id = account_id.lower().replace("@", "_").replace(":", "_").replace("/", "_")
+    local_path = os.path.join(LIBRARIES_DIR, f"{clean_id}.json")
+
+    # 1. Try reading local storage first
+    if os.path.isfile(local_path):
+        try:
+            with open(local_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return web.json_response({
+                "success": True,
+                "account_id": account_id,
+                "library": data.get("library") or data,
+                "updated_at": data.get("updated_at"),
+                "source": "local_mirror",
+            })
+        except Exception as e:
+            logger.warning(f"Error reading local library for {account_id}: {e}")
+
+    # 2. Fallback to Cloudflare KV primary store
+    try:
+        cf_url = f"https://sonora-website.maksinegor821.workers.dev/api/library/sync?account_id={urllib.parse.quote(account_id)}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(cf_url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                if resp.status == 200:
+                    cf_data = await resp.json()
+                    if cf_data.get("library"):
+                        try:
+                            with open(local_path, "w", encoding="utf-8") as f:
+                                json.dump(cf_data, f, ensure_ascii=False, indent=2)
+                        except Exception:
+                            pass
+                    return web.json_response(cf_data)
+    except Exception as e:
+        logger.debug(f"CF KV fallback get error: {e}")
+
+    return web.json_response({"success": True, "account_id": account_id, "library": None})
+
+
+async def handle_library_sync_post(request: web.Request) -> web.Response:
+    """Saves user library to local persistent store and mirrors to Cloudflare KV."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"success": False, "error": "Invalid JSON"}, status=400)
+
+    account_id = (body.get("account_id") or body.get("user_id") or "").strip()
+    library = body.get("library")
+    if not account_id or not library:
+        return web.json_response({"success": False, "error": "Missing account_id or library"}, status=400)
+
+    clean_id = account_id.lower().replace("@", "_").replace(":", "_").replace("/", "_")
+    local_path = os.path.join(LIBRARIES_DIR, f"{clean_id}.json")
+    now_iso = datetime.utcnow().isoformat() + "Z"
+    record = {
+        "account_id": account_id,
+        "library": library,
+        "updated_at": now_iso,
+    }
+
+    # 1. Save locally
+    try:
+        with open(local_path, "w", encoding="utf-8") as f:
+            json.dump(record, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save local library for {account_id}: {e}")
+
+    # 2. Mirror asynchronously to Cloudflare KV
+    async def mirror_to_cf():
+        try:
+            cf_url = "https://sonora-website.maksinegor821.workers.dev/api/library/sync"
+            async with aiohttp.ClientSession() as session:
+                await session.post(cf_url, json={"account_id": account_id, "library": library}, timeout=aiohttp.ClientTimeout(total=4))
+        except Exception as e:
+            logger.debug(f"Mirror to Cloudflare KV error: {e}")
+
+    asyncio.create_task(mirror_to_cf())
+
+    playlist_count = len(library.get("playlists", [])) if isinstance(library.get("playlists"), list) else 0
+    favorite_count = len(library.get("favorites", [])) if isinstance(library.get("favorites"), list) else 0
+
+    return web.json_response({
+        "success": True,
+        "account_id": account_id,
+        "saved_at": now_iso,
+        "playlist_count": playlist_count,
+        "favorite_count": favorite_count,
+    })
 
 
 async def handle_request_otp(request: web.Request) -> web.Response:
@@ -1688,6 +1786,11 @@ def create_http_app() -> web.Application:
     app.router.add_get("/api/public-endpoint", handle_public_endpoint)
     # Playlist Importer Cloud Proxy
     app.router.add_get("/api/playlist/youtube", handle_playlist_youtube)
+    # User Library Cloud Sync
+    app.router.add_get("/api/library/sync", handle_library_sync_get)
+    app.router.add_post("/api/library/sync", handle_library_sync_post)
+    app.router.add_get("/api/user/library", handle_library_sync_get)
+    app.router.add_post("/api/user/library", handle_library_sync_post)
     # Avatars
     app.router.add_get("/api/avatar/{handle}", handle_serve_avatar)
     # Google OAuth Web Portal
