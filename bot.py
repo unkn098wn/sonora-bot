@@ -16,6 +16,7 @@ Features:
 """
 
 import asyncio
+import aiohttp
 import base64
 import hashlib
 import hmac
@@ -1167,7 +1168,7 @@ async def handle_playlist_youtube(request: web.Request) -> web.Response:
         except Exception:
             continue
 
-    return web.json_response({"success": False, "error": "Не удалось загрузить плейлист с серверов YouTube", "debug_it": it_err if "it_err" in locals() else f"status_{it_status}" if "it_status" in locals() else "no_call"}, status=502)
+    return web.json_response({"success": False, "error": "Не удалось загрузить плейлист с серверов YouTube"}, status=502)
 
 
 async def handle_verify_otp(request: web.Request) -> web.Response:
