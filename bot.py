@@ -310,9 +310,14 @@ class UserManager:
         clean = email.lower().strip()
         async with self._lock:
             target_key = None
-            clean_id = user_id.replace("tg_", "").replace("email_", "")
+            clean_id = user_id.replace("tg_", "").replace("email_", "").strip()
             for k, u in self._users.items():
-                if k == user_id or str(u.get("telegram_id")) == clean_id or u.get("user_id") == user_id:
+                if (
+                    k == user_id or 
+                    str(u.get("telegram_id")) == clean_id or 
+                    u.get("user_id") == user_id or 
+                    str(u.get("username", "")).lower().lstrip("@") == clean_id.lower().lstrip("@")
+                ):
                     target_key = k
                     break
             if not target_key and user_id in self._users:
@@ -1056,6 +1061,20 @@ class EmailService:
             with open(self.config_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             logger.info(f"Saved email configuration to {self.config_file}")
+
+            # Keep os.environ in sync immediately
+            if self.resend_api_key:
+                os.environ["RESEND_API_KEY"] = self.resend_api_key
+            if self.resend_from:
+                os.environ["RESEND_FROM"] = self.resend_from
+            if self.host:
+                os.environ["SMTP_HOST"] = self.host
+            if self.port:
+                os.environ["SMTP_PORT"] = str(self.port)
+            if self.user:
+                os.environ["SMTP_USER"] = self.user
+            if self.password:
+                os.environ["SMTP_PASSWORD"] = self.password
         except Exception as e:
             logger.error(f"Failed to save email config: {e}")
 
@@ -1654,6 +1673,7 @@ async def handle_link_email(request: web.Request) -> web.Response:
         data = await request.json()
         raw_email = str(data.get("email", "")).strip().lower()
         user_id = str(data.get("user_id", "")).strip()
+        tg_handle = str(data.get("telegram_handle", "")).strip().lstrip("@")
 
         if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", raw_email):
             return web.json_response({
@@ -1669,11 +1689,27 @@ async def handle_link_email(request: web.Request) -> web.Response:
 
         # Check if requesting user has a Telegram ID to deliver instant push notification
         tg_id = None
-        if user_id.startswith("tg_") and user_id[3:].isdigit():
-            tg_id = int(user_id[3:])
-        elif user_id.isdigit():
-            tg_id = int(user_id)
-        else:
+        clean_target = user_id.replace("tg_", "").replace("email_", "").strip()
+        if clean_target.isdigit():
+            tg_id = int(clean_target)
+        elif clean_target:
+            u = await user_manager.get_by_handle(clean_target)
+            if u and u.get("telegram_id"):
+                tg_id = int(u["telegram_id"])
+            elif clean_target.lower() == "wezreg":
+                tg_id = ADMIN_ID
+
+        if not tg_id and tg_handle:
+            if tg_handle.isdigit():
+                tg_id = int(tg_handle)
+            else:
+                u = await user_manager.get_by_handle(tg_handle)
+                if u and u.get("telegram_id"):
+                    tg_id = int(u["telegram_id"])
+                elif tg_handle.lower() == "wezreg":
+                    tg_id = ADMIN_ID
+
+        if not tg_id:
             u = await user_manager.get_by_email(raw_email)
             if u and u.get("telegram_id"):
                 tg_id = int(u["telegram_id"])
@@ -2578,6 +2614,207 @@ def parse_adm_list_callback(data: str):
     return page, filter_st
 
 
+# Keyboards
+def get_guest_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    if user_id is not None and user_id == ADMIN_ID:
+        is_admin = True
+    rows = []
+    if is_admin:
+        rows.append([
+            InlineKeyboardButton(
+                text="🐞 Баги и отчеты",
+                callback_data="adm_list_0_all",
+            ),
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                text="🔐 Панель администратора",
+                callback_data="admin_panel",
+            ),
+        ])
+    rows.extend([
+        [
+            InlineKeyboardButton(
+                text="🚀 Зарегистрироваться в Sonora",
+                callback_data="do_register",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📦 Скачать Sonora",
+                callback_data="dl_menu",
+            ),
+            InlineKeyboardButton(
+                text="✨ Возможности",
+                callback_data="features_menu",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="💬 Обратная связь",
+                callback_data="feedback_start",
+            ),
+            InlineKeyboardButton(
+                text="🛡️ Конфиденциальность",
+                callback_data="privacy_menu",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📊 Статус серверов",
+                callback_data="status_menu",
+            ),
+            InlineKeyboardButton(
+                text="❓ Как войти?",
+                callback_data="help_login",
+            ),
+        ],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_user_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    if user_id is not None and user_id == ADMIN_ID:
+        is_admin = True
+    rows = []
+    if is_admin:
+        rows.append([
+            InlineKeyboardButton(
+                text="🐞 Баги и отчеты",
+                callback_data="adm_list_0_all",
+            ),
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                text="🔐 Панель администратора",
+                callback_data="admin_panel",
+            ),
+        ])
+    rows.extend([
+        [
+            InlineKeyboardButton(
+                text="🔄 Запросить новый код",
+                callback_data="refresh_code",
+            ),
+            InlineKeyboardButton(
+                text="👤 Мой профиль",
+                callback_data="my_profile",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📦 Скачать Sonora",
+                callback_data="dl_menu",
+            ),
+            InlineKeyboardButton(
+                text="✨ Возможности",
+                callback_data="features_menu",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="💬 Обратная связь",
+                callback_data="feedback_start",
+            ),
+            InlineKeyboardButton(
+                text="🛡️ Конфиденциальность",
+                callback_data="privacy_menu",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📊 Статус серверов",
+                callback_data="status_menu",
+            ),
+            InlineKeyboardButton(
+                text="❓ Как войти?",
+                callback_data="help_login",
+            ),
+        ],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_download_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📱 Скачать для Android (Универсальный APK, 138 МБ)",
+                    url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💻 Скачать для Windows (Установщик Setup.exe, 28.5 МБ)",
+                    url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🌐 Официальный сайт Sonora",
+                    url="https://sonora-website.maksinegor821.workers.dev",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Главное меню",
+                    callback_data="back_home",
+                ),
+            ],
+        ]
+    )
+
+
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
+                InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
+            ]
+        ]
+    )
+
+
+def get_profile_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    if user_id is not None and user_id == ADMIN_ID:
+        is_admin = True
+    rows = []
+    if is_admin:
+        rows.append([
+            InlineKeyboardButton(text="🐞 Баги и отчеты", callback_data="adm_list_0_all"),
+        ])
+        rows.append([
+            InlineKeyboardButton(text="🔐 Панель администратора", callback_data="admin_panel"),
+        ])
+    rows.extend([
+        [
+            InlineKeyboardButton(text="🔑 Получить код для входа", callback_data="refresh_code"),
+            InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
+        ],
+        [
+            InlineKeyboardButton(text="💬 Обратная связь", callback_data="feedback_start"),
+            InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
+        ],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def get_status_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 Обновить статус", callback_data="status_menu"),
+                InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
+            ],
+            [
+                InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
+            ],
+        ]
+    )
+
+
 async def run_telegram_bot():
     """Runs aiogram 3.7+ bot with graceful reconnect loop and zero chat clutter."""
     global active_bot_instance
@@ -2606,182 +2843,6 @@ async def run_telegram_bot():
         )
         active_bot_instance = bot
         dp = Dispatcher()
-
-        # Keyboards
-        def get_guest_keyboard() -> InlineKeyboardMarkup:
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🚀 Зарегистрироваться в Sonora",
-                            callback_data="do_register",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="📦 Скачать Sonora",
-                            callback_data="dl_menu",
-                        ),
-                        InlineKeyboardButton(
-                            text="✨ Возможности",
-                            callback_data="features_menu",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="💬 Обратная связь",
-                            callback_data="feedback_start",
-                        ),
-                        InlineKeyboardButton(
-                            text="🛡️ Конфиденциальность",
-                            callback_data="privacy_menu",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="📊 Статус серверов",
-                            callback_data="status_menu",
-                        ),
-                        InlineKeyboardButton(
-                            text="❓ Как войти?",
-                            callback_data="help_login",
-                        ),
-                    ],
-                ]
-            )
-
-        def get_user_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
-            if user_id is not None and user_id == ADMIN_ID:
-                is_admin = True
-            rows = []
-            if is_admin:
-                rows.append([
-                    InlineKeyboardButton(
-                        text="🐞 Баги и отчеты",
-                        callback_data="adm_list_0_all",
-                    ),
-                    InlineKeyboardButton(
-                        text="🔐 Панель администратора",
-                        callback_data="admin_panel",
-                    ),
-                ])
-            rows.extend([
-                [
-                    InlineKeyboardButton(
-                        text="🔄 Запросить новый код",
-                        callback_data="refresh_code",
-                    ),
-                    InlineKeyboardButton(
-                        text="👤 Мой профиль",
-                        callback_data="my_profile",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="📦 Скачать Sonora",
-                        callback_data="dl_menu",
-                    ),
-                    InlineKeyboardButton(
-                        text="✨ Возможности",
-                        callback_data="features_menu",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="💬 Обратная связь",
-                        callback_data="feedback_start",
-                    ),
-                    InlineKeyboardButton(
-                        text="🛡️ Конфиденциальность",
-                        callback_data="privacy_menu",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="📊 Статус серверов",
-                        callback_data="status_menu",
-                    ),
-                    InlineKeyboardButton(
-                        text="❓ Как войти?",
-                        callback_data="help_login",
-                    ),
-                ],
-            ])
-            return InlineKeyboardMarkup(inline_keyboard=rows)
-
-        def get_download_keyboard() -> InlineKeyboardMarkup:
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="📱 Скачать для Android (Универсальный APK, 138 МБ)",
-                            url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="💻 Скачать для Windows (Установщик Setup.exe, 28.5 МБ)",
-                            url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="🌐 Официальный сайт Sonora",
-                            url="https://sonora-website.maksinegor821.workers.dev",
-                        ),
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text="◀️ Главное меню",
-                            callback_data="back_home",
-                        ),
-                    ],
-                ]
-            )
-
-        def get_back_keyboard() -> InlineKeyboardMarkup:
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
-                        InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
-                    ]
-                ]
-            )
-
-        def get_profile_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
-            if user_id is not None and user_id == ADMIN_ID:
-                is_admin = True
-            rows = []
-            if is_admin:
-                rows.append([
-                    InlineKeyboardButton(text="🐞 Баги и отчеты", callback_data="adm_list_0_all"),
-                    InlineKeyboardButton(text="🔐 Панель администратора", callback_data="admin_panel"),
-                ])
-            rows.extend([
-                [
-                    InlineKeyboardButton(text="🔑 Получить код для входа", callback_data="refresh_code"),
-                    InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
-                ],
-                [
-                    InlineKeyboardButton(text="💬 Обратная связь", callback_data="feedback_start"),
-                    InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
-                ],
-            ])
-            return InlineKeyboardMarkup(inline_keyboard=rows)
-
-        def get_status_keyboard() -> InlineKeyboardMarkup:
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="🔄 Обновить статус", callback_data="status_menu"),
-                        InlineKeyboardButton(text="📦 Скачать Sonora", callback_data="dl_menu"),
-                    ],
-                    [
-                        InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home"),
-                    ],
-                ]
-            )
 
         async def safe_edit_or_resend(event_or_message, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
             """Safely edit message in-place or replace photo without TelegramBadRequest errors."""
@@ -2927,7 +2988,7 @@ async def run_telegram_bot():
                 await handle_user_command(message, text, reply_markup=get_user_keyboard(user_id=user_id))
             else:
                 text = format_guest_welcome()
-                await handle_user_command(message, text, reply_markup=get_guest_keyboard())
+                await handle_user_command(message, text, reply_markup=get_guest_keyboard(user_id=user_id))
 
         @dp.message(Command("register"))
         @dp.callback_query(F.data == "do_register")
@@ -3186,7 +3247,7 @@ async def run_telegram_bot():
                 )
                 await safe_edit_or_resend(callback, text, reply_markup=get_user_keyboard(user_id=user_id))
             else:
-                await safe_edit_or_resend(callback, format_guest_welcome(), reply_markup=get_guest_keyboard())
+                await safe_edit_or_resend(callback, format_guest_welcome(), reply_markup=get_guest_keyboard(user_id=user_id))
             await callback.answer()
 
         # ======================================================================
@@ -3439,9 +3500,9 @@ async def run_telegram_bot():
                 if direct_tg_url:
                     kb_rows.append([InlineKeyboardButton(text=f"💬 Написать автору #{tid}", url=direct_tg_url)])
 
-                st_btn_res = InlineKeyboardButton(text=f"✅ #{tid} Решено", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}")
-                st_btn_work = InlineKeyboardButton(text=f"🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_{page}_{filter_status}")
-                del_btn = InlineKeyboardButton(text=f"🗑️ Удалить", callback_data=f"adm_del_{tid}_{page}_{filter_status}")
+                st_btn_res = InlineKeyboardButton(text="✅ Принять (Решено)", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}")
+                st_btn_work = InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_{page}_{filter_status}")
+                del_btn = InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"adm_del_{tid}_{page}_{filter_status}")
                 kb_rows.append([st_btn_res, st_btn_work, del_btn])
 
             # Navigation pagination row
@@ -3464,13 +3525,11 @@ async def run_telegram_bot():
             ])
 
             # Bulk actions row
-            bulk_row = []
-            if res_cnt > 0:
-                bulk_row.append(InlineKeyboardButton(text=f"🗑️ Удалить все решенные ({res_cnt})", callback_data="adm_clear_resolved"))
-            if all_cnt > 0:
-                bulk_row.append(InlineKeyboardButton(text="🗑️ Удалить ВСЕ отчеты", callback_data="adm_clear_all_confirm"))
-            if bulk_row:
-                kb_rows.append(bulk_row)
+            bulk_row = [
+                InlineKeyboardButton(text=f"🗑️ Удалить все решенные ({res_cnt})", callback_data="adm_clear_resolved"),
+                InlineKeyboardButton(text="🗑️ Удалить ВСЕ отчеты", callback_data="adm_clear_all_confirm"),
+            ]
+            kb_rows.append(bulk_row)
 
             # Back & Refresh row
             kb_rows.append([
@@ -3486,8 +3545,10 @@ async def run_telegram_bot():
             else:
                 await handle_user_command(event_or_message, final_text, reply_markup=kb)
 
-        @dp.message(Command("reports", "bugs"))
-        @dp.message(F.text.in_(["🐞 Баги и отчеты", "Баги и отчеты", "/reports", "/bugs"]))
+        @dp.message(Command("reports", "bugs", "report", "bug"))
+        @dp.message(F.text.func(lambda t: t and t.strip().lower() in [
+            "🐞 баги и отчеты", "баги и отчеты", "баги", "репорты", "отчеты", "/reports", "/bugs", "/report", "/bug"
+        ]))
         async def on_cmd_reports(message: types.Message):
             if message.from_user.id != ADMIN_ID:
                 await message.answer("⛔ Данный раздел доступен только администратору.")
@@ -3572,27 +3633,58 @@ async def run_telegram_bot():
 
             success = await reports_manager.update_status(tid, new_st)
             msg_text = callback.message.text or ""
-            is_list_view = "Центр обработки багов" in msg_text or "Обращения (" in msg_text or len(callback.data.split("_")) > 4
+            is_list_view = "Центр обработки багов" in msg_text or "Обращения (" in msg_text
+            is_detail_view = "📑 Тикет #" in msg_text
 
             if success:
                 await callback.answer(f"✅ Статус тикета #{tid} изменен на: {st_label}", show_alert=False)
                 if is_list_view:
                     await show_admin_reports_list(callback, page=page, filter_status=filter_status)
-                else:
+                elif is_detail_view:
                     updated_report = await reports_manager.get_by_ticket(tid)
                     if updated_report:
                         callback.data = f"adm_view_{tid}_{page}_{filter_status}"
                         await on_admin_view(callback)
+                    else:
+                        await show_admin_reports_list(callback, page=page, filter_status=filter_status)
+                else:
+                    # Standalone alert notification message
+                    try:
+                        next_st = "in_progress" if new_st == "resolved" else "resolved"
+                        next_btn_text = "🟡 В работе" if new_st == "resolved" else "🟢 Решено"
+                        alert_kb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(text=next_btn_text, callback_data=f"adm_st_{tid}_{next_st}_0_all"),
+                                    InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"adm_del_{tid}_0_all"),
+                                ],
+                                [InlineKeyboardButton(text="🐞 Список всех отчетов", callback_data="adm_list_0_all")],
+                            ]
+                        )
+                        base_msg = msg_text
+                        if "Обновление статуса:" in base_msg:
+                            base_msg = base_msg.split("Обновление статуса:")[0].rstrip()
+                        new_body = (
+                            f"{base_msg}\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Обновление статуса: {st_icon} <b>{st_label}</b>"
+                        )
+                        await callback.message.edit_text(new_body, reply_markup=alert_kb, parse_mode="HTML")
+                    except Exception:
+                        pass
             else:
                 # Ticket not in active database (legacy notification or after container reboot)
                 # NEVER throw or display "ошибка изменения статуса"!
                 await callback.answer(f"ℹ️ Статус записи #{tid} обновлен ({st_label}). Запись из архива.", show_alert=False)
-                if is_list_view:
+                if is_list_view or is_detail_view:
                     await show_admin_reports_list(callback, page=page, filter_status=filter_status)
                 else:
                     try:
+                        base_msg = msg_text
+                        if "Обновление:" in base_msg:
+                            base_msg = base_msg.split("Обновление:")[0].rstrip()
                         new_body = (
-                            f"{msg_text}\n\n"
+                            f"{base_msg}\n\n"
                             f"━━━━━━━━━━━━━━━━━━━━━━\n"
                             f"<b>Обновление:</b> {st_icon} <b>{st_label}</b> (обработано администратором)\n"
                             f"<i>Запись обработана и сохранена в архиве.</i>"
@@ -3618,8 +3710,9 @@ async def run_telegram_bot():
 
             msg_text = callback.message.text or ""
             is_list_view = "Центр обработки багов" in msg_text or "Обращения (" in msg_text
+            is_detail_view = "📑 Тикет #" in msg_text or "Тикет #" in msg_text
 
-            if is_list_view:
+            if is_list_view or is_detail_view:
                 await callback.answer(f"🗑️ Отчет #{tid} успешно удален!", show_alert=False)
                 await show_admin_reports_list(callback, page=page, filter_status=filter_status)
             else:
@@ -3737,7 +3830,7 @@ async def run_telegram_bot():
                 return
 
             text_parts = (message.text or "").strip().split()
-            if len(text_parts) == 1 or (len(text_parts) > 1 and text_parts[1].lower() in ["help", "?"]):
+            if len(text_parts) == 1 or (len(text_parts) > 1 and text_parts[1].lower() in ["help", "?", "info"]):
                 text, kb = format_email_settings_card()
                 await message.answer(text, reply_markup=kb, parse_mode="HTML")
                 return
@@ -3746,7 +3839,14 @@ async def run_telegram_bot():
 
             if subcmd == "resend" or text_parts[1].startswith("re_"):
                 api_key = text_parts[1] if text_parts[1].startswith("re_") else (text_parts[2] if len(text_parts) > 2 else "")
-                from_email = text_parts[3] if len(text_parts) > 3 else (text_parts[2] if text_parts[1].startswith("re_") and len(text_parts) > 2 else None)
+                from_email = None
+                if text_parts[1].startswith("re_"):
+                    if len(text_parts) > 2:
+                        from_email = " ".join(text_parts[2:])
+                else:
+                    if len(text_parts) > 3:
+                        from_email = " ".join(text_parts[3:])
+
                 if not api_key:
                     await message.answer("❌ Укажите API ключ: <code>/set_email resend re_123456789...</code>", parse_mode="HTML")
                     return
@@ -3760,19 +3860,45 @@ async def run_telegram_bot():
                     parse_mode="HTML"
                 )
             elif subcmd == "smtp":
-                if len(text_parts) >= 6:
-                    host = text_parts[2]
-                    port = int(text_parts[3]) if text_parts[3].isdigit() else 587
-                    user = text_parts[4]
-                    pw = text_parts[5]
-                    email_service.configure_smtp(host, port, user, pw)
-                elif len(text_parts) >= 4:
+                if len(text_parts) < 3:
+                    await message.answer(
+                        "❌ Формат:\n"
+                        "• Gmail/Yandex/Mail.ru: <code>/set_email smtp user@domain.com пароль</code>\n"
+                        "• Свои настройки: <code>/set_email smtp host port user пароль</code>",
+                        parse_mode="HTML"
+                    )
+                    return
+
+                if "@" in text_parts[2]:
+                    # Format: /set_email smtp user@domain.com password (which may contain spaces!)
                     user = text_parts[2]
-                    pw = text_parts[3]
+                    raw_pw_parts = text_parts[3:]
+                    if not raw_pw_parts:
+                        await message.answer("❌ Укажите пароль: <code>/set_email smtp user@domain.com пароль</code>", parse_mode="HTML")
+                        return
+                    joined_no_space = "".join(raw_pw_parts)
+                    if len(joined_no_space) == 16 and all(c.isalnum() for c in joined_no_space):
+                        pw = joined_no_space
+                    else:
+                        pw = " ".join(raw_pw_parts)
                     email_service.configure_smtp("", 0, user, pw)
                 else:
-                    await message.answer("❌ Формат: <code>/set_email smtp user@domain.com пароль</code>", parse_mode="HTML")
-                    return
+                    # Format: /set_email smtp host port user password
+                    if len(text_parts) >= 5:
+                        host = text_parts[2]
+                        port = int(text_parts[3]) if text_parts[3].isdigit() else 587
+                        user = text_parts[4]
+                        raw_pw_parts = text_parts[5:]
+                        joined_no_space = "".join(raw_pw_parts)
+                        if len(joined_no_space) == 16 and all(c.isalnum() for c in joined_no_space):
+                            pw = joined_no_space
+                        else:
+                            pw = " ".join(raw_pw_parts)
+                        email_service.configure_smtp(host, port, user, pw)
+                    else:
+                        await message.answer("❌ Недостаточно параметров. Формат: <code>/set_email smtp host port user пароль</code>", parse_mode="HTML")
+                        return
+
                 await message.answer(
                     f"✅ <b>SMTP успешно настроен!</b>\n"
                     f"• Хост: <code>{email_service.host}:{email_service.port}</code>\n"

@@ -13,11 +13,15 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from bot import (
     EmailService,
     ReportsManager,
+    UserManager,
     ADMIN_ID,
     parse_adm_st_callback,
     parse_adm_del_callback,
     parse_adm_view_callback,
     parse_adm_list_callback,
+    get_guest_keyboard,
+    get_user_keyboard,
+    get_profile_keyboard,
 )
 
 
@@ -60,6 +64,10 @@ class TestEmailService(unittest.TestCase):
 
     def test_resend_api_error_handling(self):
         self.email_svc.configure_resend("re_invalid_key", "onboarding@resend.dev")
+        # Ensure SMTP is unconfigured so it doesn't attempt network fallback
+        self.email_svc.host = ""
+        self.email_svc.user = ""
+        self.email_svc.password = ""
 
         http_err = urllib.error.HTTPError(
             url="https://api.resend.com/emails",
@@ -74,6 +82,25 @@ class TestEmailService(unittest.TestCase):
             self.assertFalse(ok)
             self.assertIn("401", msg)
             self.assertIn("Invalid API key", msg)
+
+    def test_resend_fallback_to_smtp_on_failure(self):
+        self.email_svc.configure_resend("re_invalid_key", "onboarding@resend.dev")
+        self.email_svc.configure_smtp("smtp.gmail.com", 587, "user@gmail.com", "secret")
+
+        http_err = urllib.error.HTTPError(
+            url="https://api.resend.com/emails",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=MagicMock(read=lambda: json.dumps({"message": "Invalid API key"}).encode("utf-8"))
+        )
+
+        with patch("urllib.request.urlopen", side_effect=http_err), \
+             patch.object(self.email_svc, "_send_smtp_sync", return_value=(True, "Sent via SMTP fallback")) as mock_smtp:
+            ok, msg = self.email_svc._send_sync("user@domain.com", "999888")
+            self.assertTrue(ok)
+            self.assertIn("Sent via SMTP fallback", msg)
+            mock_smtp.assert_called_once_with("user@domain.com", "999888")
 
     def test_smtp_auto_detect(self):
         svc = EmailService(config_file=os.path.join(self.tmp_dir.name, "smtp_test.json"))
@@ -99,6 +126,27 @@ class TestEmailService(unittest.TestCase):
         self.assertEqual(loaded.resend_api_key, "re_saved_key_xyz")
         self.assertEqual(loaded.resend_from, "support@sonora.app")
         self.assertTrue(loaded.is_resend_configured)
+
+    def test_save_config_updates_environ(self):
+        self.email_svc.configure_resend("re_env_key_123", "bot@sonora.app")
+        self.assertEqual(os.environ.get("RESEND_API_KEY"), "re_env_key_123")
+        self.assertEqual(os.environ.get("RESEND_FROM"), "bot@sonora.app")
+
+        self.email_svc.configure_smtp("smtp.gmail.com", 587, "user@gmail.com", "mypassword")
+        self.assertEqual(os.environ.get("SMTP_HOST"), "smtp.gmail.com")
+        self.assertEqual(os.environ.get("SMTP_PORT"), "587")
+        self.assertEqual(os.environ.get("SMTP_USER"), "user@gmail.com")
+        self.assertEqual(os.environ.get("SMTP_PASSWORD"), "mypassword")
+
+    def test_google_app_password_with_spaces_logic(self):
+        raw_pw_parts = ["abcd", "efgh", "ijkl", "mnop"]
+        joined_no_space = "".join(raw_pw_parts)
+        self.assertEqual(len(joined_no_space), 16)
+        self.assertEqual(joined_no_space, "abcdefghijklmnop")
+        self.email_svc.configure_smtp("", 0, "user@gmail.com", joined_no_space)
+        self.assertEqual(self.email_svc.host, "smtp.gmail.com")
+        self.assertEqual(self.email_svc.port, 587)
+        self.assertEqual(self.email_svc.password, "abcdefghijklmnop")
 
 
 class TestReportsManager(unittest.IsolatedAsyncioTestCase):
@@ -272,6 +320,66 @@ class TestReportsManagerEdgeCases(unittest.IsolatedAsyncioTestCase):
         del_all = await self.rm.delete_all_reports()
         self.assertEqual(del_all, 6)
         self.assertEqual(len(await self.rm.get_all()), 0)
+
+
+class TestKeyboardsAndAdminMenu(unittest.TestCase):
+    def test_guest_keyboard_visibility(self):
+        admin_kb = get_guest_keyboard(user_id=ADMIN_ID)
+        admin_texts = [btn.text for row in admin_kb.inline_keyboard for btn in row]
+        self.assertIn("🐞 Баги и отчеты", admin_texts)
+        self.assertIn("🔐 Панель администратора", admin_texts)
+
+        guest_kb = get_guest_keyboard(user_id=12345678)
+        guest_texts = [btn.text for row in guest_kb.inline_keyboard for btn in row]
+        self.assertNotIn("🐞 Баги и отчеты", guest_texts)
+        self.assertNotIn("🔐 Панель администратора", guest_texts)
+
+    def test_user_keyboard_prominence(self):
+        admin_kb = get_user_keyboard(user_id=ADMIN_ID)
+        first_row = admin_kb.inline_keyboard[0]
+        self.assertEqual(len(first_row), 1)
+        self.assertEqual(first_row[0].text, "🐞 Баги и отчеты")
+        self.assertEqual(first_row[0].callback_data, "adm_list_0_all")
+
+        user_kb = get_user_keyboard(user_id=12345678)
+        user_texts = [btn.text for row in user_kb.inline_keyboard for btn in row]
+        self.assertNotIn("🐞 Баги и отчеты", user_texts)
+        self.assertNotIn("🔐 Панель администратора", user_texts)
+
+    def test_profile_keyboard_admin_visibility(self):
+        admin_kb = get_profile_keyboard(user_id=ADMIN_ID)
+        admin_texts = [btn.text for row in admin_kb.inline_keyboard for btn in row]
+        self.assertIn("🐞 Баги и отчеты", admin_texts)
+        self.assertIn("🔐 Панель администратора", admin_texts)
+
+        user_kb = get_profile_keyboard(user_id=12345678)
+        user_texts = [btn.text for row in user_kb.inline_keyboard for btn in row]
+        self.assertNotIn("🐞 Баги и отчеты", user_texts)
+        self.assertNotIn("🔐 Панель администратора", user_texts)
+
+
+class TestUserManagerLinking(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.users_path = os.path.join(self.tmp_dir.name, "users.json")
+        self.um = UserManager(self.users_path)
+
+    async def asyncTearDown(self):
+        self.tmp_dir.cleanup()
+
+    async def test_link_email_to_existing_telegram_user(self):
+        user = await self.um.upsert_user(960674720, username="wezreg", first_name="Admin")
+        self.assertEqual(len(self.um._users), 1)
+
+        # Link email using "tg_wezreg"
+        linked1 = await self.um.link_email_to_user("tg_wezreg", "admin@sonora.app")
+        self.assertEqual(linked1.get("email"), "admin@sonora.app")
+        self.assertEqual(len(self.um._users), 1, "Should not create duplicate user")
+
+        # Link email using "960674720"
+        linked2 = await self.um.link_email_to_user("960674720", "admin_new@sonora.app")
+        self.assertEqual(linked2.get("email"), "admin_new@sonora.app")
+        self.assertEqual(len(self.um._users), 1, "Should update same record")
 
 
 if __name__ == "__main__":
