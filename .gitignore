@@ -11,3 +11,4 @@ cloudflared.exe
 *.exe
 data/public_url.txt
 data/github_token.txt
+data/email_config.json

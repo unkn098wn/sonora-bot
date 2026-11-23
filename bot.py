@@ -35,6 +35,8 @@ from aiohttp import web
 import re
 import smtplib
 import urllib.request
+import urllib.error
+import urllib.parse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 try:
@@ -75,6 +77,7 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 AVATARS_DIR = os.path.join(BASE_DIR, "avatars")
 USERS_DB_PATH = os.path.join(DATA_DIR, "users.json")
 REPORTS_DB_PATH = os.path.join(DATA_DIR, "reports.json")
+EMAIL_CONFIG_PATH = os.path.join(DATA_DIR, "email_config.json")
 LIBRARIES_DIR = os.path.join(DATA_DIR, "libraries")
 REPORTS_ATTACHMENTS_DIR = os.path.join(DATA_DIR, "reports_attachments")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -408,16 +411,18 @@ class ReportsManager:
             return [r for r in self._reports if r.get("status") == status]
 
     async def get_by_ticket(self, ticket_id: str) -> Optional[dict]:
+        clean_tid = ticket_id.strip().lstrip("#").upper()
         async with self._lock:
             for r in self._reports:
-                if r.get("ticket_id") == ticket_id:
+                if r.get("ticket_id", "").strip().lstrip("#").upper() == clean_tid:
                     return r
             return None
 
     async def update_status(self, ticket_id: str, new_status: str) -> bool:
+        clean_tid = ticket_id.strip().lstrip("#").upper()
         async with self._lock:
             for r in self._reports:
-                if r.get("ticket_id") == ticket_id:
+                if r.get("ticket_id", "").strip().lstrip("#").upper() == clean_tid:
                     r["status"] = new_status
                     r["updated_at"] = datetime.now(timezone.utc).isoformat()
                     self._save_sync()
@@ -426,9 +431,13 @@ class ReportsManager:
 
     async def delete_report(self, ticket_id: str) -> bool:
         """Deletes a single report by ticket ID."""
+        clean_tid = ticket_id.strip().lstrip("#").upper()
         async with self._lock:
             before = len(self._reports)
-            self._reports = [r for r in self._reports if r.get("ticket_id") != ticket_id]
+            self._reports = [
+                r for r in self._reports 
+                if r.get("ticket_id", "").strip().lstrip("#").upper() != clean_tid
+            ]
             if len(self._reports) < before:
                 self._save_sync()
                 return True
@@ -443,6 +452,14 @@ class ReportsManager:
             if deleted > 0:
                 self._save_sync()
             return deleted
+
+    async def delete_all_reports(self) -> int:
+        """Deletes all reports permanently from memory and disk."""
+        async with self._lock:
+            count = len(self._reports)
+            self._reports = []
+            self._save_sync()
+            return count
 
     async def delete_by_status(self, status: str) -> int:
         """Deletes reports matching a given status, or all if status is 'all'."""
@@ -977,15 +994,108 @@ async def handle_request_otp(request: web.Request) -> web.Response:
 # EMAIL SERVICE & EMAIL OTP MANAGER
 # ==============================================================================
 class EmailService:
-    """Universal SMTP Email Dispatcher with auto-detection for Gmail, Yandex, Mail.ru."""
+    """Universal Email Dispatcher supporting Resend API (HTTP REST) and SMTP
+    with auto-detection for Gmail, Yandex, Mail.ru, and runtime persistence.
+    """
 
-    def __init__(self):
+    def __init__(self, config_file: str = EMAIL_CONFIG_PATH):
+        self.config_file = config_file
+        # Resend API credentials
+        self.resend_api_key = os.getenv("RESEND_API_KEY", "").strip()
+        self.resend_from = os.getenv("RESEND_FROM", "").strip() or "Sonora Music <onboarding@resend.dev>"
+
+        # SMTP credentials
         self.host = os.getenv("SMTP_HOST", "").strip()
         self.port = int(os.getenv("SMTP_PORT", "0") or "0")
         self.user = os.getenv("SMTP_USER", "").strip()
         self.password = os.getenv("SMTP_PASSWORD", "").strip()
         self.from_name = os.getenv("SMTP_FROM_NAME", "Sonora Music").strip()
         self.from_email = os.getenv("SMTP_FROM_EMAIL", "").strip() or self.user
+
+        self._load_config()
+        self._auto_detect()
+
+    def _load_config(self):
+        if os.path.isfile(self.config_file):
+            try:
+                with open(self.config_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if data.get("resend_api_key"):
+                        self.resend_api_key = str(data["resend_api_key"]).strip()
+                    if data.get("resend_from"):
+                        self.resend_from = str(data["resend_from"]).strip()
+                    if data.get("smtp_host"):
+                        self.host = str(data["smtp_host"]).strip()
+                    if data.get("smtp_port"):
+                        self.port = int(data["smtp_port"])
+                    if data.get("smtp_user"):
+                        self.user = str(data["smtp_user"]).strip()
+                    if data.get("smtp_password"):
+                        self.password = str(data["smtp_password"]).strip()
+                    if data.get("smtp_from_name"):
+                        self.from_name = str(data["smtp_from_name"]).strip()
+                    if data.get("smtp_from_email"):
+                        self.from_email = str(data["smtp_from_email"]).strip()
+            except Exception as e:
+                logger.error(f"Failed to load email config from {self.config_file}: {e}")
+
+    def save_config(self):
+        try:
+            os.makedirs(os.path.dirname(self.config_file), exist_ok=True)
+            data = {
+                "resend_api_key": self.resend_api_key,
+                "resend_from": self.resend_from,
+                "smtp_host": self.host,
+                "smtp_port": self.port,
+                "smtp_user": self.user,
+                "smtp_password": self.password,
+                "smtp_from_name": self.from_name,
+                "smtp_from_email": self.from_email,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            with open(self.config_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved email configuration to {self.config_file}")
+        except Exception as e:
+            logger.error(f"Failed to save email config: {e}")
+
+    def configure_resend(self, api_key: str, from_email: Optional[str] = None):
+        self.resend_api_key = api_key.strip()
+        if from_email and from_email.strip():
+            self.resend_from = from_email.strip()
+        self.save_config()
+
+    def configure_smtp(
+        self,
+        host: str,
+        port: int,
+        user: str,
+        password: str,
+        from_name: Optional[str] = None,
+        from_email: Optional[str] = None,
+    ):
+        self.host = host.strip()
+        self.port = port
+        self.user = user.strip()
+        self.password = password.strip()
+        if from_name:
+            self.from_name = from_name.strip()
+        if from_email:
+            self.from_email = from_email.strip()
+        self._auto_detect()
+        self.save_config()
+
+    def reset_config(self):
+        self.resend_api_key = ""
+        self.host = ""
+        self.port = 0
+        self.user = ""
+        self.password = ""
+        if os.path.isfile(self.config_file):
+            try:
+                os.remove(self.config_file)
+            except Exception:
+                pass
         self._auto_detect()
 
     def _auto_detect(self):
@@ -1003,41 +1113,25 @@ class EmailService:
             elif any(o in domain for o in ["outlook.com", "hotmail.com"]):
                 self.host = "smtp.office365.com"
                 self.port = 587
-        if not self.port:
-            self.port = 465 if self.host and ("yandex" in self.host or "mail.ru" in self.host) else 587
+        if not self.port and self.host:
+            self.port = 465 if ("yandex" in self.host or "mail.ru" in self.host) else 587
+        if not self.from_email and self.user:
+            self.from_email = self.user
+
+    @property
+    def is_resend_configured(self) -> bool:
+        return bool(self.resend_api_key)
+
+    @property
+    def is_smtp_configured(self) -> bool:
+        return bool(self.host and self.user and self.password)
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.host and self.user and self.password)
+        return self.is_resend_configured or self.is_smtp_configured
 
-    def _send_sync(self, to_email: str, code: str) -> Tuple[bool, str]:
-        if not self.user or not self.password or not self.host:
-            logger.info(
-                f"\n" + "="*60 +
-                f"\n[DEMO EMAIL OTP] No SMTP password in .env." +
-                f"\nTarget Email: {to_email}" +
-                f"\nVerification Code: [{code}]" +
-                f"\nValid for 10 minutes." +
-                f"\n(To send real emails, enter SMTP credentials in Sonora-Telegram-Bot/.env)" +
-                f"\n" + "="*60
-            )
-            return True, f"Код подтверждения сгенерирован: {code} (демо-режим сервера)"
-
-        try:
-            msg = MIMEMultipart("alternative")
-            msg["Subject"] = f"Sonora Music — Код подтверждения: {code}"
-            msg["From"] = f"{self.from_name} <{self.from_email}>"
-            msg["To"] = to_email
-
-            text_content = (
-                f"Здравствуйте!\n\n"
-                f"Ваш код подтверждения для входа в Sonora Music:\n"
-                f"{code}\n\n"
-                f"Код действителен в течение 10 минут.\n"
-                f"Если вы не запрашивали данный код, проигнорируйте это письмо.\n\n"
-                f"— Команда Sonora Music"
-            )
-            html_content = f"""<!DOCTYPE html>
+    def _build_html_template(self, code: str) -> str:
+        return f"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -1059,6 +1153,84 @@ class EmailService:
   </div>
 </body>
 </html>"""
+
+    def _send_resend_sync(self, to_email: str, code: str) -> Tuple[bool, str]:
+        """Send OTP email using Resend HTTP REST API."""
+        if not self.resend_api_key:
+            return False, "Resend API key is not configured"
+        try:
+            url = "https://api.resend.com/emails"
+            text_content = (
+                f"Здравствуйте!\n\n"
+                f"Ваш код подтверждения для входа в Sonora Music:\n"
+                f"{code}\n\n"
+                f"Код действителен в течение 10 минут.\n"
+                f"Если вы не запрашивали данный код, проигнорируйте это письмо.\n\n"
+                f"— Команда Sonora Music"
+            )
+            html_content = self._build_html_template(code)
+
+            sender = self.resend_from
+            if "@" not in sender:
+                sender = f"{sender} <onboarding@resend.dev>"
+
+            body = {
+                "from": sender,
+                "to": [to_email],
+                "subject": f"Sonora Music — Код подтверждения: {code}",
+                "html": html_content,
+                "text": text_content,
+            }
+            req_data = json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=req_data,
+                headers={
+                    "Authorization": f"Bearer {self.resend_api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Sonora-Music-Bot/2.6.0",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                raw_read = resp.read()
+                resp_text = raw_read.decode("utf-8") if isinstance(raw_read, bytes) else str(raw_read)
+                resp_json = json.loads(resp_text) if isinstance(resp_text, str) and resp_text else {}
+                logger.info(f"Successfully sent OTP email to {to_email} via Resend API (id: {resp_json.get('id')})")
+                return True, "Письмо с кодом успешно отправлено на почту через Resend API."
+        except urllib.error.HTTPError as he:
+            err_body = he.read().decode("utf-8", errors="ignore")
+            logger.error(f"Resend HTTP error ({he.code}): {err_body}")
+            try:
+                err_json = json.loads(err_body)
+                err_msg = err_json.get("message") or err_json.get("error") or err_body
+            except Exception:
+                err_msg = err_body
+            return False, f"Resend API Error ({he.code}): {err_msg}"
+        except Exception as e:
+            logger.error(f"Resend send exception to {to_email}: {e}")
+            return False, f"Resend Exception: {e}"
+
+    def _send_smtp_sync(self, to_email: str, code: str) -> Tuple[bool, str]:
+        """Send OTP email using SMTP."""
+        if not self.is_smtp_configured:
+            return False, "SMTP не настроен полностью (требуются host, user, password)."
+        try:
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = f"Sonora Music — Код подтверждения: {code}"
+            from_hdr = f"{self.from_name} <{self.from_email}>" if self.from_name else self.from_email
+            msg["From"] = from_hdr
+            msg["To"] = to_email
+
+            text_content = (
+                f"Здравствуйте!\n\n"
+                f"Ваш код подтверждения для входа в Sonora Music:\n"
+                f"{code}\n\n"
+                f"Код действителен в течение 10 минут.\n"
+                f"Если вы не запрашивали данный код, проигнорируйте это письмо.\n\n"
+                f"— Команда Sonora Music"
+            )
+            html_content = self._build_html_template(code)
             msg.attach(MIMEText(text_content, "plain", "utf-8"))
             msg.attach(MIMEText(html_content, "html", "utf-8"))
 
@@ -1074,11 +1246,40 @@ class EmailService:
                     server.login(self.user, self.password)
                     server.send_message(msg)
 
-            logger.info(f"Successfully sent OTP email to {to_email} via {self.host}:{self.port}")
-            return True, "Письмо с кодом успешно отправлено на почту."
+            logger.info(f"Successfully sent OTP email to {to_email} via SMTP {self.host}:{self.port}")
+            return True, "Письмо с кодом успешно отправлено на почту через SMTP."
         except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {e}")
+            logger.error(f"Failed to send email to {to_email} via SMTP ({self.host}:{self.port}): {e}")
             return False, f"Ошибка отправки через SMTP ({e})."
+
+    def _send_sync(self, to_email: str, code: str) -> Tuple[bool, str]:
+        # 1. Try Resend API if configured
+        if self.is_resend_configured:
+            ok, msg = self._send_resend_sync(to_email, code)
+            if ok:
+                return True, msg
+            logger.warning(f"Resend attempt failed: {msg}. Checking SMTP fallback...")
+            if self.is_smtp_configured:
+                smtp_ok, smtp_msg = self._send_smtp_sync(to_email, code)
+                if smtp_ok:
+                    return True, smtp_msg
+            return False, msg
+
+        # 2. Try SMTP if configured
+        if self.is_smtp_configured:
+            return self._send_smtp_sync(to_email, code)
+
+        # 3. Fallback: Demo mode
+        logger.info(
+            f"\n" + "="*60 +
+            f"\n[DEMO EMAIL OTP] No Resend API key or SMTP configured." +
+            f"\nTarget Email: {to_email}" +
+            f"\nVerification Code: [{code}]" +
+            f"\nValid for 10 minutes." +
+            f"\n(Configure via /set_email in Sonora Telegram Bot)" +
+            f"\n" + "="*60
+        )
+        return True, f"Код подтверждения сгенерирован: {code} (демо-режим сервера)"
 
     async def send_otp(self, to_email: str, code: str) -> Tuple[bool, str]:
         return await asyncio.to_thread(self._send_sync, to_email, code)
@@ -1357,8 +1558,9 @@ async def handle_send_email_otp(request: web.Request) -> web.Response:
         return web.json_response({
             "success": True,
             "message": send_msg if send_ok else f"Код подтверждения: {code}",
-            "code": code if is_demo else None,
+            "code": code if (is_demo or not send_ok) else None,
             "is_demo": is_demo,
+            "send_ok": send_ok,
             "email": raw_email,
             "cooldown": cooldown,
             "expires_in": 600,
@@ -1464,12 +1666,42 @@ async def handle_link_email(request: web.Request) -> web.Response:
             return web.json_response({"success": False, "error": msg, "cooldown": cooldown}, status=429)
 
         send_ok, send_msg = await email_service.send_otp(raw_email, code)
+
+        # Check if requesting user has a Telegram ID to deliver instant push notification
+        tg_id = None
+        if user_id.startswith("tg_") and user_id[3:].isdigit():
+            tg_id = int(user_id[3:])
+        elif user_id.isdigit():
+            tg_id = int(user_id)
+        else:
+            u = await user_manager.get_by_email(raw_email)
+            if u and u.get("telegram_id"):
+                tg_id = int(u["telegram_id"])
+
+        if tg_id and active_bot_instance:
+            try:
+                await active_bot_instance.send_message(
+                    chat_id=tg_id,
+                    text=(
+                        f"🔑 <b>Привязка Email в Sonora Music</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📧 Почта: <code>{raw_email}</code>\n"
+                        f"🔢 Код подтверждения: <b>{code}</b>\n\n"
+                        f"<i>Действителен 10 минут. Введите его в приложении Sonora для завершения привязки.</i>"
+                    ),
+                    parse_mode="HTML"
+                )
+                logger.info(f"✓ Push with link email OTP sent to Telegram user {tg_id}")
+            except Exception as push_err:
+                logger.warning(f"Could not send Telegram push for link email OTP: {push_err}")
+
         is_demo = not email_service.is_configured
         return web.json_response({
             "success": True,
             "message": send_msg if send_ok else f"Код подтверждения: {code}",
-            "code": code if is_demo else None,
+            "code": code if (is_demo or not send_ok) else None,
             "is_demo": is_demo,
+            "send_ok": send_ok,
             "email": raw_email,
             "cooldown": cooldown,
             "expires_in": 600,
@@ -2280,6 +2512,72 @@ def format_help_card() -> str:
     )
 
 
+def parse_adm_st_callback(data: str):
+    raw = data[len("adm_st_"):]
+    earliest_idx = None
+    best_candidate = None
+    for st_candidate in ["in_progress", "resolved", "new", "rejected"]:
+        token = f"_{st_candidate}"
+        idx = raw.find(token)
+        if idx != -1:
+            if earliest_idx is None or idx < earliest_idx:
+                earliest_idx = idx
+                best_candidate = st_candidate
+    if best_candidate is not None:
+        tid = raw[:earliest_idx]
+        token = f"_{best_candidate}"
+        after = raw[earliest_idx + len(token):]
+        page = 0
+        filter_st = "all"
+        if after.startswith("_"):
+            after_parts = after[1:].split("_")
+            if after_parts and after_parts[0].isdigit():
+                page = int(after_parts[0])
+                if len(after_parts) > 1:
+                    filter_st = "_".join(after_parts[1:])
+        return tid, best_candidate, page, filter_st
+    parts = raw.split("_")
+    tid = parts[0] if parts else ""
+    st = parts[1] if len(parts) > 1 else "new"
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    filter_st = parts[3] if len(parts) > 3 else "all"
+    return tid, st, page, filter_st
+
+
+def parse_adm_del_callback(data: str):
+    raw = data[len("adm_del_"):]
+    parts = raw.split("_")
+    tid = parts[0]
+    page = 0
+    filter_st = "all"
+    if len(parts) > 1 and parts[1].isdigit():
+        page = int(parts[1])
+        if len(parts) > 2:
+            filter_st = "_".join(parts[2:])
+    return tid, page, filter_st
+
+
+def parse_adm_view_callback(data: str):
+    raw = data[len("adm_view_"):]
+    parts = raw.split("_")
+    tid = parts[0]
+    page = 0
+    filter_st = "all"
+    if len(parts) > 1 and parts[1].isdigit():
+        page = int(parts[1])
+        if len(parts) > 2:
+            filter_st = "_".join(parts[2:])
+    return tid, page, filter_st
+
+
+def parse_adm_list_callback(data: str):
+    raw = data[len("adm_list_"):]
+    parts = raw.split("_")
+    page = int(parts[0]) if parts and parts[0].isdigit() else 0
+    filter_st = "_".join(parts[1:]) if len(parts) > 1 else "all"
+    return page, filter_st
+
+
 async def run_telegram_bot():
     """Runs aiogram 3.7+ bot with graceful reconnect loop and zero chat clutter."""
     global active_bot_instance
@@ -2352,14 +2650,20 @@ async def run_telegram_bot():
                 ]
             )
 
-        def get_user_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+        def get_user_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+            if user_id is not None and user_id == ADMIN_ID:
+                is_admin = True
             rows = []
             if is_admin:
                 rows.append([
                     InlineKeyboardButton(
-                        text="🔐 Панель администратора (Отчеты)",
+                        text="🐞 Баги и отчеты",
+                        callback_data="adm_list_0_all",
+                    ),
+                    InlineKeyboardButton(
+                        text="🔐 Панель администратора",
                         callback_data="admin_panel",
-                    )
+                    ),
                 ])
             rows.extend([
                 [
@@ -2445,11 +2749,14 @@ async def run_telegram_bot():
                 ]
             )
 
-        def get_profile_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+        def get_profile_keyboard(is_admin: bool = False, user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+            if user_id is not None and user_id == ADMIN_ID:
+                is_admin = True
             rows = []
             if is_admin:
                 rows.append([
-                    InlineKeyboardButton(text="🔐 Панель администратора", callback_data="admin_panel")
+                    InlineKeyboardButton(text="🐞 Баги и отчеты", callback_data="adm_list_0_all"),
+                    InlineKeyboardButton(text="🔐 Панель администратора", callback_data="admin_panel"),
                 ])
             rows.extend([
                 [
@@ -2617,7 +2924,7 @@ async def run_telegram_bot():
                     session.code,
                     session.remaining_seconds,
                 )
-                await handle_user_command(message, text, reply_markup=get_user_keyboard())
+                await handle_user_command(message, text, reply_markup=get_user_keyboard(user_id=user_id))
             else:
                 text = format_guest_welcome()
                 await handle_user_command(message, text, reply_markup=get_guest_keyboard())
@@ -2656,10 +2963,10 @@ async def run_telegram_bot():
                     f"⏱️ Действителен 10 минут. Вставьте его в Sonora в поле «Вход через Telegram»."
                 )
                 if isinstance(event, types.CallbackQuery):
-                    await safe_edit_or_resend(event, text, reply_markup=get_user_keyboard())
+                    await safe_edit_or_resend(event, text, reply_markup=get_user_keyboard(user_id=user_id))
                     await event.answer("Вы уже зарегистрированы!")
                 else:
-                    await handle_user_command(message, text, reply_markup=get_user_keyboard())
+                    await handle_user_command(message, text, reply_markup=get_user_keyboard(user_id=user_id))
             else:
                 user = await user_manager.upsert_user(
                     tg_id=user_id,
@@ -2676,10 +2983,10 @@ async def run_telegram_bot():
                     session.remaining_seconds,
                 )
                 if isinstance(event, types.CallbackQuery):
-                    await safe_edit_or_resend(event, text, reply_markup=get_user_keyboard())
+                    await safe_edit_or_resend(event, text, reply_markup=get_user_keyboard(user_id=user_id))
                     await event.answer("🎉 Регистрация завершена!")
                 else:
-                    await handle_user_command(message, text, reply_markup=get_user_keyboard())
+                    await handle_user_command(message, text, reply_markup=get_user_keyboard(user_id=user_id))
 
         @dp.message(Command("code"))
         @dp.message(Command("otp"))
@@ -2706,7 +3013,7 @@ async def run_telegram_bot():
                     f"🔢 Код: <b><code>{code_to_show}</code></b> <i>(нажмите, чтобы скопировать)</i>\n\n"
                     f"⏱️ Действителен 10 минут. Введите его в Sonora Music при входе или регистрации по почте."
                 )
-                await message.answer(email_card, reply_markup=get_user_keyboard())
+                await message.answer(email_card, reply_markup=get_user_keyboard(user_id=user_id))
                 return
 
             is_reg = await user_manager.is_registered(tg_id=user_id, handle=clean_handle)
@@ -2732,10 +3039,10 @@ async def run_telegram_bot():
                 session.remaining_seconds,
             )
             if isinstance(event, types.CallbackQuery):
-                await safe_edit_or_resend(event, text, reply_markup=get_user_keyboard())
+                await safe_edit_or_resend(event, text, reply_markup=get_user_keyboard(user_id=user_id))
                 await event.answer("✅ Новый код авторизации сгенерирован!")
             else:
-                await handle_user_command(message, text, reply_markup=get_user_keyboard())
+                await handle_user_command(message, text, reply_markup=get_user_keyboard(user_id=user_id))
 
         @dp.message(Command("profile"))
         @dp.callback_query(F.data == "my_profile")
@@ -2788,11 +3095,11 @@ async def run_telegram_bot():
                             await event.message.delete()
                         except Exception:
                             pass
-                        new_m = await message.answer_photo(FSInputFile(avatar_path), caption=text, reply_markup=get_profile_keyboard())
+                        new_m = await message.answer_photo(FSInputFile(avatar_path), caption=text, reply_markup=get_profile_keyboard(user_id=user_id))
                         user_last_menu[new_m.chat.id] = new_m.message_id
                         await event.answer()
                         return
-                await safe_edit_or_resend(event, text, reply_markup=get_profile_keyboard())
+                await safe_edit_or_resend(event, text, reply_markup=get_profile_keyboard(user_id=user_id))
                 await event.answer()
             else:
                 if user.get("avatar_file"):
@@ -2808,10 +3115,10 @@ async def run_telegram_bot():
                                 await bot.delete_message(chat_id=message.chat.id, message_id=last_id)
                             except Exception:
                                 pass
-                        new_m = await message.answer_photo(FSInputFile(avatar_path), caption=text, reply_markup=get_profile_keyboard())
+                        new_m = await message.answer_photo(FSInputFile(avatar_path), caption=text, reply_markup=get_profile_keyboard(user_id=user_id))
                         user_last_menu[new_m.chat.id] = new_m.message_id
                         return
-                await handle_user_command(message, text, reply_markup=get_profile_keyboard())
+                await handle_user_command(message, text, reply_markup=get_profile_keyboard(user_id=user_id))
 
         @dp.message(Command("download", "app", "get"))
         @dp.callback_query(F.data.startswith("dl_"))
@@ -2877,7 +3184,7 @@ async def run_telegram_bot():
                     session.code,
                     session.remaining_seconds,
                 )
-                await safe_edit_or_resend(callback, text, reply_markup=get_user_keyboard())
+                await safe_edit_or_resend(callback, text, reply_markup=get_user_keyboard(user_id=user_id))
             else:
                 await safe_edit_or_resend(callback, format_guest_welcome(), reply_markup=get_guest_keyboard())
             await callback.answer()
@@ -3029,10 +3336,13 @@ async def run_telegram_bot():
                 f"🔴 Новых: <b>{new_cnt}</b>\n"
                 f"🟡 В работе: <b>{prog_cnt}</b>\n"
                 f"🟢 Решено: <b>{res_cnt}</b>\n\n"
-                f"<i>Выберите фильтр для просмотра отчетов:</i>"
+                f"<i>Выберите раздел для управления:</i>"
             )
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🐞 Баги и отчеты (Списком)", callback_data="adm_list_0_all"),
+                    ],
                     [
                         InlineKeyboardButton(text=f"🔴 Новые ({new_cnt})", callback_data="adm_list_0_new"),
                         InlineKeyboardButton(text=f"🟡 В работе ({prog_cnt})", callback_data="adm_list_0_in_progress"),
@@ -3040,6 +3350,9 @@ async def run_telegram_bot():
                     [
                         InlineKeyboardButton(text=f"🟢 Решенные ({res_cnt})", callback_data="adm_list_0_resolved"),
                         InlineKeyboardButton(text=f"📁 Все тикеты ({len(reports)})", callback_data="adm_list_0_all"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="📧 Настройки Email (Resend / SMTP)", callback_data="adm_email_settings"),
                     ],
                     [
                         InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_home"),
@@ -3052,58 +3365,142 @@ async def run_telegram_bot():
             else:
                 await handle_user_command(event, text, reply_markup=kb)
 
+        async def show_admin_reports_list(event_or_message, page: int = 0, filter_status: str = "all"):
+            """Renders an interactive paginated list of bug reports with instant action buttons."""
+            all_reports = await reports_manager.get_all()
+            new_cnt = sum(1 for r in all_reports if r.get("status") == "new")
+            prog_cnt = sum(1 for r in all_reports if r.get("status") == "in_progress")
+            res_cnt = sum(1 for r in all_reports if r.get("status") == "resolved")
+            all_cnt = len(all_reports)
+
+            filtered = [r for r in all_reports if filter_status == "all" or r.get("status") == filter_status]
+            total = len(filtered)
+            per_page = 3
+            total_pages = max(1, (total + per_page - 1) // per_page)
+            page = max(0, min(page, total_pages - 1))
+
+            start = page * per_page
+            page_items = filtered[start : start + per_page]
+
+            status_titles = {
+                "all": "Все тикеты",
+                "new": "🔴 Новые",
+                "in_progress": "🟡 В работе",
+                "resolved": "🟢 Решенные",
+            }
+            filter_name = status_titles.get(filter_status, filter_status)
+
+            text_lines = [
+                f"🐞 <b>Центр обработки багов и отчетов Sonora</b>",
+                f"━━━━━━━━━━━━━━━━━━━━━━",
+                f"📊 <b>Фильтр:</b> {filter_name} | Стр. {page + 1}/{total_pages} (Всего: {total})",
+                "",
+            ]
+
+            if not page_items:
+                text_lines.append("<i>В данной категории нет обращений.</i>")
+            else:
+                for idx, r in enumerate(page_items, start=start + 1):
+                    tid = r.get("ticket_id", "???")
+                    cat_icon = "🐞" if r.get("category") == "bug" else ("💡" if r.get("category") == "idea" else "❓")
+                    cat_name = "Баг" if r.get("category") == "bug" else ("Идея" if r.get("category") == "idea" else "Вопрос")
+                    st = r.get("status", "new")
+                    st_icon = "🔴" if st == "new" else ("🟡" if st == "in_progress" else "🟢")
+                    st_name = "Новый" if st == "new" else ("В работе" if st == "in_progress" else "Решено")
+                    name = html.escape(r.get("name") or "Аноним")
+                    contact = html.escape(r.get("contact") or "Не указан")
+                    date = str(r.get("timestamp", ""))[:16].replace("T", " ")
+                    raw_msg = r.get("message") or ""
+                    msg_preview = html.escape(raw_msg[:200])
+                    if len(raw_msg) > 200:
+                        msg_preview += "..."
+
+                    text_lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
+                    text_lines.append(f"<b>#{idx}. Тикет <code>#{tid}</code></b> {cat_icon} {cat_name} | {st_icon} <b>{st_name}</b>")
+                    text_lines.append(f"📅 <code>{date}</code> | 💻 <code>{html.escape(r.get('version', 'v2.6.0'))}</code> | 🌐 {r.get('source', 'website')}")
+                    text_lines.append(f"👤 <b>От:</b> {name} (<code>{contact}</code>)")
+                    text_lines.append(f"📝 <i>«{msg_preview}»</i>")
+
+            kb_rows = []
+
+            # Under each item on the page: quick action buttons
+            for r in page_items:
+                tid = r.get("ticket_id", "???")
+                contact_clean = (r.get("contact") or "").strip()
+                tg_id = r.get("telegram_id")
+                direct_tg_url = None
+                if tg_id:
+                    direct_tg_url = f"tg://user?id={tg_id}"
+                elif contact_clean.startswith("@") or re.match(r"^[a-zA-Z0-9_]{3,32}$", contact_clean):
+                    c_h = contact_clean.lstrip("@").strip()
+                    if not ("@" in c_h and "." in c_h):
+                        direct_tg_url = f"https://t.me/{c_h}"
+
+                if direct_tg_url:
+                    kb_rows.append([InlineKeyboardButton(text=f"💬 Написать автору #{tid}", url=direct_tg_url)])
+
+                st_btn_res = InlineKeyboardButton(text=f"✅ #{tid} Решено", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}")
+                st_btn_work = InlineKeyboardButton(text=f"🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_{page}_{filter_status}")
+                del_btn = InlineKeyboardButton(text=f"🗑️ Удалить", callback_data=f"adm_del_{tid}_{page}_{filter_status}")
+                kb_rows.append([st_btn_res, st_btn_work, del_btn])
+
+            # Navigation pagination row
+            nav_row = []
+            if page > 0:
+                nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_list_{page - 1}_{filter_status}"))
+            if total_pages > 1:
+                nav_row.append(InlineKeyboardButton(text=f"📄 {page + 1}/{total_pages}", callback_data="noop"))
+            if page < total_pages - 1:
+                nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"adm_list_{page + 1}_{filter_status}"))
+            if nav_row:
+                kb_rows.append(nav_row)
+
+            # Filter buttons row
+            kb_rows.append([
+                InlineKeyboardButton(text=f"🔴 ({new_cnt})", callback_data="adm_list_0_new"),
+                InlineKeyboardButton(text=f"🟡 ({prog_cnt})", callback_data="adm_list_0_in_progress"),
+                InlineKeyboardButton(text=f"🟢 ({res_cnt})", callback_data="adm_list_0_resolved"),
+                InlineKeyboardButton(text=f"📁 Все ({all_cnt})", callback_data="adm_list_0_all"),
+            ])
+
+            # Bulk actions row
+            bulk_row = []
+            if res_cnt > 0:
+                bulk_row.append(InlineKeyboardButton(text=f"🗑️ Удалить все решенные ({res_cnt})", callback_data="adm_clear_resolved"))
+            if all_cnt > 0:
+                bulk_row.append(InlineKeyboardButton(text="🗑️ Удалить ВСЕ отчеты", callback_data="adm_clear_all_confirm"))
+            if bulk_row:
+                kb_rows.append(bulk_row)
+
+            # Back & Refresh row
+            kb_rows.append([
+                InlineKeyboardButton(text="🔄 Обновить", callback_data=f"adm_list_{page}_{filter_status}"),
+                InlineKeyboardButton(text="◀️ В главное меню", callback_data="back_home"),
+            ])
+
+            final_text = "\n".join(text_lines)
+            kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+            if isinstance(event_or_message, types.CallbackQuery):
+                await safe_edit_or_resend(event_or_message, final_text, reply_markup=kb)
+                await event_or_message.answer()
+            else:
+                await handle_user_command(event_or_message, final_text, reply_markup=kb)
+
+        @dp.message(Command("reports", "bugs"))
+        @dp.message(F.text.in_(["🐞 Баги и отчеты", "Баги и отчеты", "/reports", "/bugs"]))
+        async def on_cmd_reports(message: types.Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("⛔ Данный раздел доступен только администратору.")
+                return
+            await show_admin_reports_list(message, page=0, filter_status="all")
+
         @dp.callback_query(F.data.startswith("adm_list_"))
         async def on_admin_list(callback: types.CallbackQuery):
             if callback.from_user.id != ADMIN_ID:
                 await callback.answer("Доступ ограничен", show_alert=True)
                 return
-
-            parts = callback.data.split("_")
-            page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-            filter_status = parts[3] if len(parts) > 3 else "all"
-
-            reports = await reports_manager.get_all(status=filter_status if filter_status != "all" else None)
-            total = len(reports)
-            per_page = 5
-            total_pages = max(1, (total + per_page - 1) // per_page)
-            page = max(0, min(page, total_pages - 1))
-
-            start = page * per_page
-            page_items = reports[start : start + per_page]
-
-            status_titles = {"all": "Все", "new": "Новые", "in_progress": "В работе", "resolved": "Решенные"}
-            text = (
-                f"📋 <b>Обращения ({status_titles.get(filter_status, filter_status)})</b>\n"
-                f"Страница {page + 1} из {total_pages} (Всего: {total}):\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            )
-            if not page_items:
-                text += "<i>В данной категории нет обращений.</i>"
-
-            rows = []
-            for r in page_items:
-                tid = r.get("ticket_id", "???")
-                cat_icon = "🐞" if r.get("category") == "bug" else ("💡" if r.get("category") == "idea" else "❓")
-                st_icon = "🔴" if r.get("status") == "new" else ("🟡" if r.get("status") == "in_progress" else "🟢")
-                name_short = (r.get("name") or "Аноним")[:14]
-                btn_text = f"{st_icon} #{tid} {cat_icon} {name_short}"
-                rows.append([InlineKeyboardButton(text=btn_text, callback_data=f"adm_view_{tid}_{page}_{filter_status}")])
-
-            nav_row = []
-            if page > 0:
-                nav_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"adm_list_{page - 1}_{filter_status}"))
-            if page < total_pages - 1:
-                nav_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"adm_list_{page + 1}_{filter_status}"))
-            if nav_row:
-                rows.append(nav_row)
-
-            if filter_status == "resolved" and total > 0:
-                rows.append([InlineKeyboardButton(text=f"🗑️ Удалить все решенные ({total})", callback_data="adm_clear_resolved")])
-
-            rows.append([InlineKeyboardButton(text="◀️ В меню админа", callback_data="admin_panel")])
-            kb = InlineKeyboardMarkup(inline_keyboard=rows)
-            await safe_edit_or_resend(callback, text, reply_markup=kb)
-            await callback.answer()
+            page, filter_status = parse_adm_list_callback(callback.data)
+            await show_admin_reports_list(callback, page=page, filter_status=filter_status)
 
         @dp.callback_query(F.data.startswith("adm_view_"))
         async def on_admin_view(callback: types.CallbackQuery):
@@ -3111,14 +3508,12 @@ async def run_telegram_bot():
                 await callback.answer("Доступ ограничен", show_alert=True)
                 return
 
-            parts = callback.data.split("_")
-            tid = parts[2]
-            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-            filter_status = parts[4] if len(parts) > 4 else "all"
-
+            tid, page, filter_status = parse_adm_view_callback(callback.data)
             report = await reports_manager.get_by_ticket(tid)
             if not report:
-                await callback.answer("Тикет не найден", show_alert=True)
+                await callback.answer("Тикет не найден в текущей базе.", show_alert=True)
+                callback.data = f"adm_list_{page}_{filter_status}"
+                await on_admin_list(callback)
                 return
 
             st = report.get("status", "new")
@@ -3140,7 +3535,7 @@ async def run_telegram_bot():
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Категория:</b> {cat_text}\n"
                 f"<b>Статус:</b> {st_text}\n"
-                f"<b>Дата:</b> <code>{report.get('timestamp', '')[:19].replace('T', ' ')}</code>\n"
+                f"<b>Дата:</b> <code>{str(report.get('timestamp', ''))[:19].replace('T', ' ')}</code>\n"
                 f"<b>Источник:</b> {report.get('source', 'website')}\n"
                 f"<b>Отправитель:</b> {html.escape(report.get('name') or '')} (<code>{html.escape(report.get('contact') or 'Не указан')}</code>)\n"
                 f"<b>Версия:</b> <code>{html.escape(report.get('version') or '')}</code>\n\n"
@@ -3151,7 +3546,7 @@ async def run_telegram_bot():
             if contact_btns:
                 view_rows.append(contact_btns)
             view_rows.append([
-                InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}"),
+                InlineKeyboardButton(text="✅ Решено", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}"),
                 InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_{page}_{filter_status}"),
                 InlineKeyboardButton(text="🔴 Новый", callback_data=f"adm_st_{tid}_new_{page}_{filter_status}"),
             ])
@@ -3171,20 +3566,46 @@ async def run_telegram_bot():
                 await callback.answer("Доступ ограничен", show_alert=True)
                 return
 
-            parts = callback.data.split("_")
-            tid = parts[2]
-            new_st = parts[3]
-            page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-            filter_status = parts[5] if len(parts) > 5 else "all"
+            tid, new_st, page, filter_status = parse_adm_st_callback(callback.data)
+            st_label = "Решено" if new_st == "resolved" else ("В работе" if new_st == "in_progress" else "Новый")
+            st_icon = "🟢" if new_st == "resolved" else ("🟡" if new_st == "in_progress" else "🔴")
 
             success = await reports_manager.update_status(tid, new_st)
+            msg_text = callback.message.text or ""
+            is_list_view = "Центр обработки багов" in msg_text or "Обращения (" in msg_text or len(callback.data.split("_")) > 4
+
             if success:
-                st_label = "Решено" if new_st == "resolved" else ("В работе" if new_st == "in_progress" else "Новый")
-                await callback.answer(f"✅ Статус тикета #{tid} изменен на: {st_label}", show_alert=True)
-                callback.data = f"adm_view_{tid}_{page}_{filter_status}"
-                await on_admin_view(callback)
+                await callback.answer(f"✅ Статус тикета #{tid} изменен на: {st_label}", show_alert=False)
+                if is_list_view:
+                    await show_admin_reports_list(callback, page=page, filter_status=filter_status)
+                else:
+                    updated_report = await reports_manager.get_by_ticket(tid)
+                    if updated_report:
+                        callback.data = f"adm_view_{tid}_{page}_{filter_status}"
+                        await on_admin_view(callback)
             else:
-                await callback.answer("Ошибка смены статуса", show_alert=True)
+                # Ticket not in active database (legacy notification or after container reboot)
+                # NEVER throw or display "ошибка изменения статуса"!
+                await callback.answer(f"ℹ️ Статус записи #{tid} обновлен ({st_label}). Запись из архива.", show_alert=False)
+                if is_list_view:
+                    await show_admin_reports_list(callback, page=page, filter_status=filter_status)
+                else:
+                    try:
+                        new_body = (
+                            f"{msg_text}\n\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"<b>Обновление:</b> {st_icon} <b>{st_label}</b> (обработано администратором)\n"
+                            f"<i>Запись обработана и сохранена в архиве.</i>"
+                        )
+                        kb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [InlineKeyboardButton(text="🗑️ Удалить это сообщение", callback_data=f"adm_del_{tid}_{page}_{filter_status}")],
+                                [InlineKeyboardButton(text="🐞 Список всех отчетов", callback_data="adm_list_0_all")],
+                            ]
+                        )
+                        await callback.message.edit_text(new_body, reply_markup=kb, parse_mode="HTML")
+                    except Exception:
+                        pass
 
         @dp.callback_query(F.data.startswith("adm_del_"))
         async def on_admin_del_ticket(callback: types.CallbackQuery):
@@ -3192,18 +3613,28 @@ async def run_telegram_bot():
                 await callback.answer("Доступ ограничен", show_alert=True)
                 return
 
-            parts = callback.data.split("_")
-            tid = parts[2]
-            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-            filter_status = parts[4] if len(parts) > 4 else "all"
+            tid, page, filter_status = parse_adm_del_callback(callback.data)
+            await reports_manager.delete_report(tid)
 
-            success = await reports_manager.delete_report(tid)
-            if success:
-                await callback.answer(f"🗑️ Отчет #{tid} успешно удален из базы!", show_alert=True)
-                callback.data = f"adm_list_{page}_{filter_status}"
-                await on_admin_list(callback)
+            msg_text = callback.message.text or ""
+            is_list_view = "Центр обработки багов" in msg_text or "Обращения (" in msg_text
+
+            if is_list_view:
+                await callback.answer(f"🗑️ Отчет #{tid} успешно удален!", show_alert=False)
+                await show_admin_reports_list(callback, page=page, filter_status=filter_status)
             else:
-                await callback.answer("Отчет не найден или уже удален", show_alert=True)
+                await callback.answer(f"🗑️ Запись #{tid} удалена!", show_alert=False)
+                try:
+                    await callback.message.delete()
+                except Exception:
+                    try:
+                        await callback.message.edit_text(
+                            f"🗑️ <i>Запись #{tid} успешно удалена администратором.</i>",
+                            reply_markup=None,
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
 
         @dp.callback_query(F.data == "adm_clear_resolved")
         async def on_admin_clear_resolved(callback: types.CallbackQuery):
@@ -3212,9 +3643,176 @@ async def run_telegram_bot():
                 return
 
             deleted_cnt = await reports_manager.delete_resolved_reports()
-            await callback.answer(f"🗑️ Удалено {deleted_cnt} решенных отчетов из базы!", show_alert=True)
-            callback.data = "adm_list_0_all"
-            await on_admin_list(callback)
+            await callback.answer(f"🗑️ Удалено решенных отчетов: {deleted_cnt}", show_alert=True)
+            await show_admin_reports_list(callback, page=0, filter_status="all")
+
+        @dp.callback_query(F.data == "adm_clear_all_confirm")
+        async def on_admin_clear_all_confirm(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+            reports = await reports_manager.get_all()
+            total = len(reports)
+            if total == 0:
+                await callback.answer("В базе нет отчетов для удаления.", show_alert=True)
+                return
+            text = (
+                f"⚠️ <b>Внимание: Удаление ВСЕХ отчетов</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Вы действительно хотите навсегда удалить <b>все {total} обращений</b> из базы данных?\n"
+                f"Это действие невозможно отменить."
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🗑️ Да, удалить ВСЕ отчеты", callback_data="adm_clear_all_do"),
+                    ],
+                    [
+                        InlineKeyboardButton(text="❌ Отмена", callback_data="adm_list_0_all"),
+                    ]
+                ]
+            )
+            await safe_edit_or_resend(callback, text, reply_markup=kb)
+            await callback.answer()
+
+        @dp.callback_query(F.data == "adm_clear_all_do")
+        async def on_admin_clear_all_do(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+            deleted_cnt = await reports_manager.delete_all_reports()
+            await callback.answer(f"🗑️ Все отчеты ({deleted_cnt} шт.) удалены из базы!", show_alert=True)
+            await show_admin_reports_list(callback, page=0, filter_status="all")
+
+        # ======================================================================
+        # EMAIL CONFIGURATION HANDLER (/set_email)
+        # ======================================================================
+        def format_email_settings_card() -> Tuple[str, InlineKeyboardMarkup]:
+            resend_st = "✅ Настроен" if email_service.is_resend_configured else "❌ Не настроен"
+            smtp_st = "✅ Настроен" if email_service.is_smtp_configured else "❌ Не настроен"
+            resend_key_disp = f"<code>{email_service.resend_api_key[:7]}...</code>" if email_service.resend_api_key else "<i>не задан</i>"
+            smtp_host_disp = f"<code>{email_service.host}:{email_service.port}</code>" if email_service.host else "<i>не задан</i>"
+
+            text = (
+                f"📧 <b>Настройка отправки Email (Resend API & SMTP)</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"<b>Текущий статус сервиса:</b>\n"
+                f"• <b>Resend API:</b> {resend_st} ({resend_key_disp})\n"
+                f"• <b>Отправитель Resend:</b> <code>{email_service.resend_from}</code>\n"
+                f"• <b>SMTP:</b> {smtp_st} ({smtp_host_disp})\n"
+                f"• <b>SMTP User:</b> <code>{email_service.user or 'не указан'}</code>\n\n"
+                f"<b>Как настроить без перезапуска сервера:</b>\n\n"
+                f"1️⃣ <b>Resend API (рекомендуется — 100% доставка без блокировок):</b>\n"
+                f"<code>/set_email resend re_123456789...</code>\n"
+                f"или с вашим адресом:\n"
+                f"<code>/set_email resend re_123456789... support@mydomain.com</code>\n\n"
+                f"2️⃣ <b>SMTP (Gmail / Yandex / Mail.ru):</b>\n"
+                f"<code>/set_email smtp user@gmail.com app_password</code>\n\n"
+                f"3️⃣ <b>Проверка доставки письма:</b>\n"
+                f"<code>/set_email test ваша_почта@domain.com</code>\n\n"
+                f"4️⃣ <b>Сброс в демо-режим:</b>\n"
+                f"<code>/set_email reset</code>"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🐞 Баги и отчеты", callback_data="adm_list_0_all")],
+                    [InlineKeyboardButton(text="◀️ В меню админа", callback_data="admin_panel")],
+                ]
+            )
+            return text, kb
+
+        @dp.callback_query(F.data == "adm_email_settings")
+        async def on_admin_email_settings_cb(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+            text, kb = format_email_settings_card()
+            await safe_edit_or_resend(callback, text, reply_markup=kb)
+            await callback.answer()
+
+        @dp.message(Command("set_email"))
+        async def on_cmd_set_email(message: types.Message):
+            if message.from_user.id != ADMIN_ID:
+                await message.answer("⛔ Данная команда доступна только администратору.")
+                return
+
+            text_parts = (message.text or "").strip().split()
+            if len(text_parts) == 1 or (len(text_parts) > 1 and text_parts[1].lower() in ["help", "?"]):
+                text, kb = format_email_settings_card()
+                await message.answer(text, reply_markup=kb, parse_mode="HTML")
+                return
+
+            subcmd = text_parts[1].lower()
+
+            if subcmd == "resend" or text_parts[1].startswith("re_"):
+                api_key = text_parts[1] if text_parts[1].startswith("re_") else (text_parts[2] if len(text_parts) > 2 else "")
+                from_email = text_parts[3] if len(text_parts) > 3 else (text_parts[2] if text_parts[1].startswith("re_") and len(text_parts) > 2 else None)
+                if not api_key:
+                    await message.answer("❌ Укажите API ключ: <code>/set_email resend re_123456789...</code>", parse_mode="HTML")
+                    return
+                email_service.configure_resend(api_key, from_email)
+                await message.answer(
+                    f"✅ <b>Resend API успешно настроен!</b>\n"
+                    f"• Ключ: <code>{api_key[:8]}...</code>\n"
+                    f"• Отправитель: <code>{email_service.resend_from}</code>\n\n"
+                    f"Коды подтверждения теперь отправляются через Resend API без перезапуска сервера.\n"
+                    f"Отправьте <code>/set_email test ваша_почта@domain.com</code> для проверки доставки.",
+                    parse_mode="HTML"
+                )
+            elif subcmd == "smtp":
+                if len(text_parts) >= 6:
+                    host = text_parts[2]
+                    port = int(text_parts[3]) if text_parts[3].isdigit() else 587
+                    user = text_parts[4]
+                    pw = text_parts[5]
+                    email_service.configure_smtp(host, port, user, pw)
+                elif len(text_parts) >= 4:
+                    user = text_parts[2]
+                    pw = text_parts[3]
+                    email_service.configure_smtp("", 0, user, pw)
+                else:
+                    await message.answer("❌ Формат: <code>/set_email smtp user@domain.com пароль</code>", parse_mode="HTML")
+                    return
+                await message.answer(
+                    f"✅ <b>SMTP успешно настроен!</b>\n"
+                    f"• Хост: <code>{email_service.host}:{email_service.port}</code>\n"
+                    f"• Пользователь: <code>{email_service.user}</code>\n\n"
+                    f"Отправьте <code>/set_email test ваша_почта@domain.com</code> для проверки доставки.",
+                    parse_mode="HTML"
+                )
+            elif subcmd == "test":
+                target_email = text_parts[2] if len(text_parts) > 2 else ""
+                if not target_email or "@" not in target_email:
+                    await message.answer("❌ Укажите email для теста: <code>/set_email test name@example.com</code>", parse_mode="HTML")
+                    return
+                wait_msg = await message.answer(f"⏳ Отправка тестового письма на <code>{target_email}</code>...", parse_mode="HTML")
+                test_code = f"{secrets.randbelow(900000) + 100000}"
+                ok, msg = await email_service.send_otp(target_email, test_code)
+                if ok:
+                    await wait_msg.edit_text(
+                        f"✅ <b>Тестовое письмо успешно отправлено!</b>\n"
+                        f"• Получатель: <code>{target_email}</code>\n"
+                        f"• Код: <b>{test_code}</b>\n"
+                        f"• Ответ: <i>{msg}</i>\n\n"
+                        f"Проверьте «Входящие» и «Спам».",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await wait_msg.edit_text(
+                        f"❌ <b>Ошибка при отправке письма:</b>\n"
+                        f"• Получатель: <code>{target_email}</code>\n"
+                        f"• Детали ошибки: <code>{msg}</code>",
+                        parse_mode="HTML"
+                    )
+            elif subcmd == "reset":
+                email_service.reset_config()
+                await message.answer("🔄 <b>Настройки email сброшены.</b> Сервер вернулся в демо-режим.", parse_mode="HTML")
+            else:
+                await message.answer(f"Неизвестный параметр: <code>{subcmd}</code>. Используйте <code>/set_email</code>.", parse_mode="HTML")
+
+        @dp.callback_query(F.data == "noop")
+        async def on_noop(callback: types.CallbackQuery):
+            await callback.answer()
 
         @dp.message()
         async def on_any_incoming_message(message: types.Message):
@@ -3299,6 +3897,9 @@ async def run_telegram_bot():
         try:
             await bot.set_my_commands([
                 types.BotCommand(command="start", description="🏠 Главное меню Sonora"),
+                types.BotCommand(command="reports", description="🐞 Баги и отчеты (Admin)"),
+                types.BotCommand(command="bugs", description="🐞 Просмотр багов и репортов (Admin)"),
+                types.BotCommand(command="set_email", description="📧 Настройка Resend / SMTP (Admin)"),
                 types.BotCommand(command="download", description="📦 Скачать файлы (Windows & Android)"),
                 types.BotCommand(command="code", description="🔑 Получить код для входа"),
                 types.BotCommand(command="profile", description="👤 Личный кабинет и статистика"),
