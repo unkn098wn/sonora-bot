@@ -424,6 +424,39 @@ class ReportsManager:
                     return True
             return False
 
+    async def delete_report(self, ticket_id: str) -> bool:
+        """Deletes a single report by ticket ID."""
+        async with self._lock:
+            before = len(self._reports)
+            self._reports = [r for r in self._reports if r.get("ticket_id") != ticket_id]
+            if len(self._reports) < before:
+                self._save_sync()
+                return True
+            return False
+
+    async def delete_resolved_reports(self) -> int:
+        """Deletes all reports marked as resolved."""
+        async with self._lock:
+            before = len(self._reports)
+            self._reports = [r for r in self._reports if r.get("status") != "resolved"]
+            deleted = before - len(self._reports)
+            if deleted > 0:
+                self._save_sync()
+            return deleted
+
+    async def delete_by_status(self, status: str) -> int:
+        """Deletes reports matching a given status, or all if status is 'all'."""
+        async with self._lock:
+            before = len(self._reports)
+            if status == "all":
+                self._reports = []
+            else:
+                self._reports = [r for r in self._reports if r.get("status") != status]
+            deleted = before - len(self._reports)
+            if deleted > 0:
+                self._save_sync()
+            return deleted
+
 
 reports_manager = ReportsManager(REPORTS_DB_PATH)
 
@@ -830,26 +863,40 @@ async def handle_feedback_post(request: web.Request) -> web.Response:
         if active_bot_instance and ADMIN_ID:
             icon = "🐞" if category == "bug" else ("💡" if category == "idea" else "❓")
             cat_name = "БАГ-РЕПОРТ" if category == "bug" else ("ПРЕДЛОЖЕНИЕ" if category == "idea" else "ВОПРОС")
+
+            contact_clean = (contact or "").strip()
+            contact_display = html.escape(contact_clean) if contact_clean else "Не указан"
+            contact_buttons = []
+            if "@" in contact_clean and "." in contact_clean and not contact_clean.startswith("@"):
+                contact_buttons.append(InlineKeyboardButton(text="✉️ Написать автору на Email", url=f"mailto:{contact_clean}"))
+            elif contact_clean:
+                tg_handle = contact_clean.lstrip("@").strip()
+                if tg_handle:
+                    contact_buttons.append(InlineKeyboardButton(text="💬 Написать автору в Telegram", url=f"https://t.me/{tg_handle}"))
+
             alert_text = (
                 f"🚨 <b>НОВОЕ ОБРАЩЕНИЕ С САЙТА #{ticket_id}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<b>Категория:</b> {icon} <b>{cat_name}</b>\n"
-                f"<b>Отправитель:</b> {html.escape(name)} (<code>{html.escape(contact) if contact else 'Не указан'}</code>)\n"
+                f"<b>Отправитель:</b> {html.escape(name)}\n"
+                f"<b>Обратная связь:</b> <code>{contact_display}</code>\n"
                 f"<b>Платформа/версия:</b> <code>{html.escape(version)}</code>\n"
                 f"<b>Источник:</b> {source}\n\n"
                 f"📝 <b>Сообщение:</b>\n<i>{html.escape(message)}</i>"
             )
-            admin_kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{ticket_id}_resolved"),
-                        InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{ticket_id}_in_progress"),
-                    ],
-                    [
-                        InlineKeyboardButton(text="🔐 Вся админ-панель", callback_data="admin_panel"),
-                    ]
-                ]
-            )
+
+            admin_rows = []
+            if contact_buttons:
+                admin_rows.append(contact_buttons)
+            admin_rows.append([
+                InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{ticket_id}_resolved_0_all"),
+                InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{ticket_id}_in_progress_0_all"),
+                InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"adm_del_{ticket_id}_0_all"),
+            ])
+            admin_rows.append([
+                InlineKeyboardButton(text="🔐 Вся админ-панель", callback_data="admin_panel"),
+            ])
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=admin_rows)
             try:
                 await active_bot_instance.send_message(chat_id=ADMIN_ID, text=alert_text, reply_markup=admin_kb)
             except Exception as ex:
@@ -962,6 +1009,10 @@ class EmailService:
                 self.port = 587
         if not self.port:
             self.port = 465 if self.host and ("yandex" in self.host or "mail.ru" in self.host) else 587
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.host and self.user and self.password)
 
     def _send_sync(self, to_email: str, code: str) -> Tuple[bool, str]:
         if not self.user or not self.password or not self.host:
@@ -1118,6 +1169,14 @@ class EmailOtpManager:
                     return False, "Неверный код. Аккаунт временно заблокирован на 5 минут из соображений безопасности."
                 rem_tries = 5 - session.failed_attempts
                 return False, f"Неверный код подтверждения. Осталось попыток: {rem_tries}"
+
+    async def get_active_otp(self, email: str) -> Optional[str]:
+        clean_email = email.lower().strip()
+        async with self._lock:
+            s = self._sessions.get(clean_email)
+            if s and not s.is_expired and not s.is_locked:
+                return s.code
+            return None
 
 
 email_otp_manager = EmailOtpManager()
@@ -1278,12 +1337,32 @@ async def handle_send_email_otp(request: web.Request) -> web.Response:
 
         # Dispatch email
         send_ok, send_msg = await email_service.send_otp(raw_email, code)
-        if not send_ok:
-            return web.json_response({"success": False, "error": send_msg}, status=500)
 
+        # Check if email is associated with a Telegram user to send push
+        linked_user = await user_manager.get_by_email(raw_email)
+        if linked_user and linked_user.get("telegram_id") and active_bot_instance:
+            try:
+                tg_id = int(linked_user["telegram_id"])
+                await active_bot_instance.send_message(
+                    chat_id=tg_id,
+                    text=(
+                        f"🔑 <b>Код авторизации в Sonora Music</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📧 Почта: <code>{raw_email}</code>\n"
+                        f"🔢 Код: <b>{code}</b>\n\n"
+                        f"<i>Действителен 10 минут. Введите его в приложении Sonora.</i>"
+                    )
+                )
+                logger.info(f"✓ Push with email OTP sent to Telegram user {tg_id}")
+            except Exception as push_err:
+                logger.warning(f"Could not send Telegram push for email OTP: {push_err}")
+
+        is_demo = not email_service.is_configured
         return web.json_response({
             "success": True,
-            "message": send_msg,
+            "message": send_msg if send_ok else f"Код подтверждения: {code}",
+            "code": code if is_demo else None,
+            "is_demo": is_demo,
             "email": raw_email,
             "cooldown": cooldown,
             "expires_in": 600,
@@ -1389,11 +1468,15 @@ async def handle_link_email(request: web.Request) -> web.Response:
             return web.json_response({"success": False, "error": msg, "cooldown": cooldown}, status=429)
 
         send_ok, send_msg = await email_service.send_otp(raw_email, code)
+        is_demo = not email_service.is_configured
         return web.json_response({
             "success": True,
             "message": send_msg if send_ok else f"Код подтверждения: {code}",
+            "code": code if is_demo else None,
+            "is_demo": is_demo,
             "email": raw_email,
             "cooldown": cooldown,
+            "expires_in": 600,
         })
     except Exception as e:
         logger.error(f"Error in handle_link_email: {e}")
@@ -2603,6 +2686,7 @@ async def run_telegram_bot():
                     await handle_user_command(message, text, reply_markup=get_user_keyboard())
 
         @dp.message(Command("code"))
+        @dp.message(Command("otp"))
         @dp.callback_query(F.data == "refresh_code")
         async def on_code(event: types.TelegramObject):
             message = event if isinstance(event, types.Message) else event.message
@@ -2611,6 +2695,23 @@ async def run_telegram_bot():
             user_id = from_user.id
             raw_handle = from_user.username or from_user.first_name
             clean_handle = raw_handle.lstrip("@").strip()
+
+            # Check if an email parameter was provided: /code test@gmail.com or /otp test@gmail.com
+            msg_text = getattr(message, "text", "") or ""
+            cmd_args = msg_text.split()[1:] if msg_text else []
+            if cmd_args and "@" in cmd_args[0]:
+                target_email = cmd_args[0].strip().lower()
+                success, msg, cooldown, email_code = await email_otp_manager.create_or_refresh_otp(target_email)
+                code_to_show = email_code or (await email_otp_manager.get_active_otp(target_email))
+                email_card = (
+                    f"🔑 <b>Код авторизации по Email</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📧 Почта: <code>{target_email}</code>\n"
+                    f"🔢 Код: <b><code>{code_to_show}</code></b> <i>(нажмите, чтобы скопировать)</i>\n\n"
+                    f"⏱️ Действителен 10 минут. Введите его в Sonora Music при входе или регистрации по почте."
+                )
+                await message.answer(email_card, reply_markup=get_user_keyboard())
+                return
 
             is_reg = await user_manager.is_registered(tg_id=user_id, handle=clean_handle)
 
@@ -2892,7 +2993,8 @@ async def run_telegram_bot():
             }
             text = (
                 f"✍️ <b>Опишите информацию о {cat_name}:</b>\n\n"
-                f"Отправьте сообщение прямо в этот чат. Если это ошибка, можно прикрепить фото или скриншот.\n\n"
+                f"Отправьте сообщение прямо в этот чат (можно прикрепить фото или скриншот ошибки).\n\n"
+                f"💡 <i>Если у вас скрыт профиль Telegram, можете указать в тексте ваш @username или email, чтобы разработчик мог связаться с вами для уточнения деталей.</i>\n\n"
                 f"<i>Для отмены нажмите кнопку ниже:</i>"
             )
             kb = InlineKeyboardMarkup(
@@ -2999,6 +3101,9 @@ async def run_telegram_bot():
             if nav_row:
                 rows.append(nav_row)
 
+            if filter_status == "resolved" and total > 0:
+                rows.append([InlineKeyboardButton(text=f"🗑️ Удалить все решенные ({total})", callback_data="adm_clear_resolved")])
+
             rows.append([InlineKeyboardButton(text="◀️ В меню админа", callback_data="admin_panel")])
             kb = InlineKeyboardMarkup(inline_keyboard=rows)
             await safe_edit_or_resend(callback, text, reply_markup=kb)
@@ -3024,6 +3129,16 @@ async def run_telegram_bot():
             st_text = "🔴 Новый" if st == "new" else ("🟡 В работе" if st == "in_progress" else "🟢 Решено")
             cat_text = "🐞 Баг" if report.get("category") == "bug" else ("💡 Идея" if report.get("category") == "idea" else "❓ Вопрос")
 
+            contact_clean = (report.get("contact") or "").strip()
+            tg_id = report.get("telegram_id")
+            contact_btns = []
+            if tg_id:
+                contact_btns.append(InlineKeyboardButton(text="💬 Написать автору в Telegram", url=f"tg://user?id={tg_id}"))
+            elif contact_clean.startswith("@"):
+                contact_btns.append(InlineKeyboardButton(text="💬 Написать автору в Telegram", url=f"https://t.me/{contact_clean.lstrip('@')}"))
+            elif "@" in contact_clean and "." in contact_clean:
+                contact_btns.append(InlineKeyboardButton(text="✉️ Написать на Email", url=f"mailto:{contact_clean}"))
+
             text = (
                 f"📑 <b>Тикет #{tid}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -3036,18 +3151,21 @@ async def run_telegram_bot():
                 f"📝 <b>Сообщение:</b>\n<i>{html.escape(report.get('message') or '')}</i>"
             )
 
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}"),
-                        InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_{page}_{filter_status}"),
-                        InlineKeyboardButton(text="🔴 Новый", callback_data=f"adm_st_{tid}_new_{page}_{filter_status}"),
-                    ],
-                    [
-                        InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"adm_list_{page}_{filter_status}"),
-                    ]
-                ]
-            )
+            view_rows = []
+            if contact_btns:
+                view_rows.append(contact_btns)
+            view_rows.append([
+                InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_{page}_{filter_status}"),
+                InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_{page}_{filter_status}"),
+                InlineKeyboardButton(text="🔴 Новый", callback_data=f"adm_st_{tid}_new_{page}_{filter_status}"),
+            ])
+            view_rows.append([
+                InlineKeyboardButton(text="🗑️ Удалить этот отчет", callback_data=f"adm_del_{tid}_{page}_{filter_status}"),
+            ])
+            view_rows.append([
+                InlineKeyboardButton(text="◀️ Назад к списку", callback_data=f"adm_list_{page}_{filter_status}"),
+            ])
+            kb = InlineKeyboardMarkup(inline_keyboard=view_rows)
             await safe_edit_or_resend(callback, text, reply_markup=kb)
             await callback.answer()
 
@@ -3072,6 +3190,36 @@ async def run_telegram_bot():
             else:
                 await callback.answer("Ошибка смены статуса", show_alert=True)
 
+        @dp.callback_query(F.data.startswith("adm_del_"))
+        async def on_admin_del_ticket(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+
+            parts = callback.data.split("_")
+            tid = parts[2]
+            page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+            filter_status = parts[4] if len(parts) > 4 else "all"
+
+            success = await reports_manager.delete_report(tid)
+            if success:
+                await callback.answer(f"🗑️ Отчет #{tid} успешно удален из базы!", show_alert=True)
+                callback.data = f"adm_list_{page}_{filter_status}"
+                await on_admin_list(callback)
+            else:
+                await callback.answer("Отчет не найден или уже удален", show_alert=True)
+
+        @dp.callback_query(F.data == "adm_clear_resolved")
+        async def on_admin_clear_resolved(callback: types.CallbackQuery):
+            if callback.from_user.id != ADMIN_ID:
+                await callback.answer("Доступ ограничен", show_alert=True)
+                return
+
+            deleted_cnt = await reports_manager.delete_resolved_reports()
+            await callback.answer(f"🗑️ Удалено {deleted_cnt} решенных отчетов из базы!", show_alert=True)
+            callback.data = "adm_list_0_all"
+            await on_admin_list(callback)
+
         @dp.message()
         async def on_any_incoming_message(message: types.Message):
             """Ensures the bot responds to user feedback inputs, or routes to start."""
@@ -3079,40 +3227,62 @@ async def run_telegram_bot():
             if chat_id in user_feedback_state:
                 state = user_feedback_state.pop(chat_id)
                 cat = state.get("category", "bug")
+                user_id = message.from_user.id
+                user_name = message.from_user.full_name or message.from_user.first_name or f"User_{user_id}"
+                user_username = message.from_user.username
+                contact_handle = f"@{user_username}" if user_username else f"ID: {user_id}"
                 user_text = message.text or message.caption or "Скриншот без текстового описания"
-                user_name = message.from_user.first_name or f"User_{message.from_user.id}"
-                contact_handle = f"@{message.from_user.username}" if message.from_user.username else f"ID:{message.from_user.id}"
 
+                # Check for explicit email or tg in user text
+                email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", user_text)
+                tg_match = re.search(r"@([a-zA-Z0-9_]{4,32})", user_text)
+                explicit_contact = ""
+                if email_match:
+                    explicit_contact = email_match.group(0)
+                elif tg_match and not user_username:
+                    explicit_contact = tg_match.group(0)
+
+                saved_contact = explicit_contact if explicit_contact else contact_handle
                 report = await reports_manager.add_report(
                     category=cat,
                     name=user_name,
-                    contact=contact_handle,
+                    contact=saved_contact,
                     message=user_text,
                     version="Telegram Bot",
                     source="telegram",
-                    telegram_id=message.from_user.id,
+                    telegram_id=user_id,
                 )
                 tid = report["ticket_id"]
 
                 # Notify Admin if message isn't from Admin himself
-                if ADMIN_ID and message.from_user.id != ADMIN_ID:
+                if ADMIN_ID and user_id != ADMIN_ID:
                     cat_name = "БАГ-РЕПОРТ" if cat == "bug" else ("ПРЕДЛОЖЕНИЕ" if cat == "idea" else "ВОПРОС")
+                    cat_icon = "🐞" if cat == "bug" else ("💡" if cat == "idea" else "❓")
+
+                    user_link = f"https://t.me/{user_username}" if user_username else f"tg://user?id={user_id}"
                     alert_text = (
                         f"🚨 <b>НОВОЕ ОБРАЩЕНИЕ ИЗ ТЕЛЕГРАМ #{tid}</b>\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"<b>Категория:</b> <b>{cat_name}</b>\n"
-                        f"<b>От:</b> {html.escape(user_name)} (<code>{contact_handle}</code>)\n\n"
+                        f"<b>Категория:</b> {cat_icon} <b>{cat_name}</b>\n"
+                        f"<b>От:</b> <a href=\"{user_link}\">{html.escape(user_name)}</a>\n"
+                        f"<b>Обратная связь:</b> <code>{html.escape(saved_contact)}</code>\n"
+                        f"<b>Telegram ID:</b> <code>{user_id}</code>\n\n"
                         f"📝 <b>Сообщение:</b>\n<i>{html.escape(user_text)}</i>"
                     )
-                    kb_adm = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_0_all"),
-                                InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_0_all"),
-                            ],
-                            [InlineKeyboardButton(text="🔐 Вся админ-панель", callback_data="admin_panel")]
-                        ]
-                    )
+
+                    admin_rows = [
+                        [InlineKeyboardButton(text="💬 Написать автору в Telegram", url=user_link)]
+                    ]
+                    if explicit_contact and "@" in explicit_contact and "." in explicit_contact:
+                        admin_rows.append([InlineKeyboardButton(text="✉️ Написать автору на Email", url=f"mailto:{explicit_contact}")])
+
+                    admin_rows.append([
+                        InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_0_all"),
+                        InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_0_all"),
+                        InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"adm_del_{tid}_0_all"),
+                    ])
+                    admin_rows.append([InlineKeyboardButton(text="🔐 Вся админ-панель", callback_data="admin_panel")])
+                    kb_adm = InlineKeyboardMarkup(inline_keyboard=admin_rows)
                     try:
                         await bot.send_message(chat_id=ADMIN_ID, text=alert_text, reply_markup=kb_adm)
                     except Exception as e:
