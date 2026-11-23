@@ -828,7 +828,6 @@ async def handle_library_sync_post(request: web.Request) -> web.Response:
 
 async def handle_feedback_post(request: web.Request) -> web.Response:
     headers = {
-        "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
     }
     try:
@@ -867,11 +866,9 @@ async def handle_feedback_post(request: web.Request) -> web.Response:
             contact_clean = (contact or "").strip()
             contact_display = html.escape(contact_clean) if contact_clean else "Не указан"
             contact_buttons = []
-            if "@" in contact_clean and "." in contact_clean and not contact_clean.startswith("@"):
-                contact_buttons.append(InlineKeyboardButton(text="✉️ Написать автору на Email", url=f"mailto:{contact_clean}"))
-            elif contact_clean:
+            if contact_clean:
                 tg_handle = contact_clean.lstrip("@").strip()
-                if tg_handle:
+                if not ("@" in tg_handle and "." in tg_handle) and re.match(r"^[a-zA-Z0-9_]{3,32}$", tg_handle):
                     contact_buttons.append(InlineKeyboardButton(text="💬 Написать автору в Telegram", url=f"https://t.me/{tg_handle}"))
 
             alert_text = (
@@ -914,7 +911,6 @@ async def handle_feedback_post(request: web.Request) -> web.Response:
 
 async def handle_feedback_get(request: web.Request) -> web.Response:
     headers = {
-        "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
     }
     try:
@@ -3134,10 +3130,10 @@ async def run_telegram_bot():
             contact_btns = []
             if tg_id:
                 contact_btns.append(InlineKeyboardButton(text="💬 Написать автору в Telegram", url=f"tg://user?id={tg_id}"))
-            elif contact_clean.startswith("@"):
-                contact_btns.append(InlineKeyboardButton(text="💬 Написать автору в Telegram", url=f"https://t.me/{contact_clean.lstrip('@')}"))
-            elif "@" in contact_clean and "." in contact_clean:
-                contact_btns.append(InlineKeyboardButton(text="✉️ Написать на Email", url=f"mailto:{contact_clean}"))
+            elif contact_clean.startswith("@") or re.match(r"^[a-zA-Z0-9_]{3,32}$", contact_clean):
+                clean_tg = contact_clean.lstrip("@").strip()
+                if clean_tg and not ("@" in clean_tg and "." in clean_tg):
+                    contact_btns.append(InlineKeyboardButton(text="💬 Написать автору в Telegram", url=f"https://t.me/{clean_tg}"))
 
             text = (
                 f"📑 <b>Тикет #{tid}</b>\n"
@@ -3273,9 +3269,6 @@ async def run_telegram_bot():
                     admin_rows = [
                         [InlineKeyboardButton(text="💬 Написать автору в Telegram", url=user_link)]
                     ]
-                    if explicit_contact and "@" in explicit_contact and "." in explicit_contact:
-                        admin_rows.append([InlineKeyboardButton(text="✉️ Написать автору на Email", url=f"mailto:{explicit_contact}")])
-
                     admin_rows.append([
                         InlineKeyboardButton(text="🟢 Решено", callback_data=f"adm_st_{tid}_resolved_0_all"),
                         InlineKeyboardButton(text="🟡 В работе", callback_data=f"adm_st_{tid}_in_progress_0_all"),
