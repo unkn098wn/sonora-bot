@@ -2593,12 +2593,17 @@ def format_guest_welcome() -> str:
 
 def format_downloads_menu() -> str:
     return (
-        "💿 <b>Официальные установщики Sonora Music v2.6.0:</b>\n"
+        "💿 <b>Официальные установщики Sonora Music v2.6.0 Obsidian Stage:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <b>Новинки v2.6.0:</b>\n"
+        "• 🎨 <b>Студия кастомизации:</b> 8 акцентов Aura Glow, палитры, адаптивные градиенты\n"
+        "• 🌌 <b>14 живых фонов:</b> Obsidian Lava, Cyber Dot Matrix, Аврора, виниловый диск\n"
+        "• 📱 <b>Кроссплатформенный паритет:</b> безупречная работа и адаптивность на смартфонах и ПК\n"
+        "• 🎛️ <b>DSP-студия:</b> 10-полосный EQ, Bass Boost, пространственный звук\n\n"
         "Доступны 2 официальных дистрибутива приложения:\n\n"
-        "📱 <b>Android:</b> Единый универсальный APK (138 МБ) — подходит для любых смартфонов и планшетов на Android.\n"
+        "📱 <b>Android:</b> Единый универсальный APK (133 МБ) — подходит для любых смартфонов и планшетов на Android.\n"
         "💻 <b>Windows:</b> Полноценный установщик Setup.exe (28.5 МБ) — установка в 1 клик с ярлыком на рабочем столе.\n\n"
-        "<i>Нажмите на кнопку нужной системы для моментальной загрузки:</i>"
+        "<i>Нажмите на кнопку нужной системы для моментальной загрузки по прямой ссылке или отправки в чат:</i>"
     )
 
 
@@ -2624,17 +2629,23 @@ def format_features_card() -> str:
     return (
         "✨ <b>Возможности Sonora Music v2.6.0:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "1. 🌐 <b>18 музыкальных платформ:</b>\n"
+        "1. 🎨 <b>Студия кастомизации & новые темы:</b>\n"
+        "   Полный контроль над стилем: 8 цветовых акцентов (Aura Glow), адаптивные палитры, темный монохром и OLED режим.\n\n"
+        "2. 🌌 <b>Живые фоны & виниловый диск:</b>\n"
+        "   14 видов анимированных сцен (Obsidian Lava, Неоновый дождь, Cyber Dot Matrix, Аврора) и фотообои.\n\n"
+        "3. 📱 <b>Полный паритет ПК и Смартфонов:</b>\n"
+        "   Идеальная адаптация под любые экраны: от компактных смартфонов (360×800) до широких мониторов (4K).\n\n"
+        "4. 🌐 <b>18 музыкальных платформ:</b>\n"
         "   YouTube Music, SoundCloud, Deezer, Яндекс, Bandcamp, PromoDJ, Mixcloud и др. Слушайте миллионы треков без подписок.\n\n"
-        "2. 🎛️ <b>Студийный DSP процессор:</b>\n"
+        "5. 🎛️ <b>Студийный DSP процессор:</b>\n"
         "   10-полосный эквалайзер, виниловый шум 33⅓, сатуратор, глубокий Bass Boost (+0..+30 dB), Slowed+Reverb.\n\n"
-        "3. 🎙️ <b>Синхронные тексты караоке (LRC):</b>\n"
+        "6. 🎙️ <b>Синхронные тексты караоке (LRC):</b>\n"
         "   Построчный кинетический текст песен в реальном времени с поддержкой кастомных текстов и перевода.\n\n"
-        "4. 🎬 <b>Сцена Obsidian Stage & Zen Mode:</b>\n"
-        "   Анимированные обложки, виниловый проигрыватель, живые авроры и режим полного погружения.\n\n"
-        "5. 🐝 <b>Секретная пасхалка «Кто пчёлок уважает» 🐝✨:</b>\n"
+        "7. 🎬 <b>Сцена Obsidian Stage & Zen Mode:</b>\n"
+        "   Анимированные обложки, виниловый проигрыватель, Aura Glow сияние и режим полного погружения.\n\n"
+        "8. 🐝 <b>Секретная пасхалка «Кто пчёлок уважает» 🐝✨:</b>\n"
         "   Плавный полёт очаровательных пчёлок с золотой пыльцой и тёплой медовой темой (#100E08)!\n\n"
-        "6. 🔐 <b>Мгновенная авторизация:</b>\n"
+        "9. 🔐 <b>Мгновенная авторизация:</b>\n"
         "   Вход в 1 клик через Telegram OTP или Google без сложных паролей."
     )
 
@@ -2842,7 +2853,7 @@ def get_download_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📱 Скачать для Android (Универсальный APK, 138 МБ)",
+                    text="📱 Скачать для Android (Универсальный APK, 133 МБ)",
                     url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk",
                 ),
             ],
@@ -2850,6 +2861,12 @@ def get_download_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="💻 Скачать для Windows (Установщик Setup.exe, 28.5 МБ)",
                     url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📎 Отправить Windows Setup.exe в чат",
+                    callback_data="send_setup_doc",
                 ),
             ],
             [
@@ -3355,7 +3372,31 @@ async def run_telegram_bot():
         # ======================================================================
         # DOWNLOAD HANDLERS (2 OFFICIAL INSTALLERS: ANDROID APK & WINDOWS SETUP)
         # ======================================================================
-        @dp.callback_query(F.data.in_(["send_setup", "send_apk", "send_portable", "send_apk_arm64", "send_apk_armv7", "send_all"]))
+        @dp.callback_query(F.data.in_(["send_setup", "send_setup_doc"]))
+        async def on_send_setup_doc_callback(callback: types.CallbackQuery):
+            setup_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.6.0-Setup.exe")
+            if not os.path.isfile(setup_path):
+                alt_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.6.0-Windows-x64-Setup.exe")
+                if os.path.isfile(alt_path):
+                    setup_path = alt_path
+            await send_file_with_cleanup(
+                callback=callback,
+                file_path=setup_path,
+                filename="Sonora-v2.6.0-Setup.exe",
+                caption="💻 <b>Официальный установщик Sonora Music v2.6.0 для Windows (Setup .exe)</b>\n\n1 клик для установки, ярлык на рабочем столе, Студия кастомизации, Aura Glow, живые фоны и поддержка Hi-Res FLAC.",
+            )
+
+        @dp.callback_query(F.data.in_(["send_apk", "send_apk_doc"]))
+        async def on_send_apk_doc_callback(callback: types.CallbackQuery):
+            apk_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.6.0-Android.apk")
+            await send_file_with_cleanup(
+                callback=callback,
+                file_path=apk_path,
+                filename="Sonora-v2.6.0-Android.apk",
+                caption="📱 <b>Официальный APK Sonora Music v2.6.0 для Android</b>\n\nСтудия кастомизации, Aura Glow, живые фоны, синхронные тексты LRC и 18 платформ без рекламы.",
+            )
+
+        @dp.callback_query(F.data.in_(["send_portable", "send_apk_arm64", "send_apk_armv7", "send_all"]))
         async def on_download_legacy_callback(callback: types.CallbackQuery):
             await callback.answer()
             text = format_downloads_menu()
