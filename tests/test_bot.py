@@ -456,6 +456,7 @@ class TestDownloadsAndFeaturesCard(unittest.TestCase):
 
         # Verify direct document sending button
         self.assertIn("send_setup_doc", callbacks)
+        self.assertIn("send_apk_doc", callbacks)
 
 
 if __name__ == "__main__":

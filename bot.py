@@ -2865,8 +2865,12 @@ def get_download_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="📎 Отправить Windows Setup.exe в чат",
+                    text="📎 Windows Setup в чат",
                     callback_data="send_setup_doc",
+                ),
+                InlineKeyboardButton(
+                    text="📎 Android APK в чат",
+                    callback_data="send_apk_doc",
                 ),
             ],
             [
