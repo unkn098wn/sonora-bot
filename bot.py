@@ -63,6 +63,9 @@ if os.path.isfile(_env_path):
         pass
 
 
+SONORA_SITE_URL = os.getenv("SONORA_SITE_URL", "https://sonoramusic.ru")
+SONORA_CF_WORKER_URL = os.getenv("SONORA_CF_WORKER_URL", "https://sonora-website.maksinegor821.workers.dev")
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -778,21 +781,22 @@ async def handle_library_sync_get(request: web.Request) -> web.Response:
             logger.warning(f"Error reading local library for {account_id}: {e}")
 
     # 2. Fallback to Cloudflare KV primary store
-    try:
-        cf_url = f"https://sonora-website.maksinegor821.workers.dev/api/library/sync?account_id={urllib.parse.quote(account_id)}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(cf_url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
-                if resp.status == 200:
-                    cf_data = await resp.json()
-                    if cf_data.get("library"):
-                        try:
-                            with open(local_path, "w", encoding="utf-8") as f:
-                                json.dump(cf_data, f, ensure_ascii=False, indent=2)
-                        except Exception:
-                            pass
-                    return web.json_response(cf_data)
-    except Exception as e:
-        logger.debug(f"CF KV fallback get error: {e}")
+    for base_url in [SONORA_SITE_URL, SONORA_CF_WORKER_URL]:
+        try:
+            cf_url = f"{base_url}/api/library/sync?account_id={urllib.parse.quote(account_id)}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(cf_url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
+                    if resp.status == 200:
+                        cf_data = await resp.json()
+                        if cf_data.get("library"):
+                            try:
+                                with open(local_path, "w", encoding="utf-8") as f:
+                                    json.dump(cf_data, f, ensure_ascii=False, indent=2)
+                            except Exception:
+                                pass
+                        return web.json_response(cf_data)
+        except Exception as e:
+            logger.debug(f"CF KV fallback get error ({base_url}): {e}")
 
     return web.json_response({"success": True, "account_id": account_id, "library": None})
 
@@ -827,12 +831,14 @@ async def handle_library_sync_post(request: web.Request) -> web.Response:
 
     # 2. Mirror asynchronously to Cloudflare KV
     async def mirror_to_cf():
-        try:
-            cf_url = "https://sonora-website.maksinegor821.workers.dev/api/library/sync"
-            async with aiohttp.ClientSession() as session:
-                await session.post(cf_url, json={"account_id": account_id, "library": library}, timeout=aiohttp.ClientTimeout(total=4))
-        except Exception as e:
-            logger.debug(f"Mirror to Cloudflare KV error: {e}")
+        for base_url in [SONORA_SITE_URL, SONORA_CF_WORKER_URL]:
+            try:
+                cf_url = f"{base_url}/api/library/sync"
+                async with aiohttp.ClientSession() as session:
+                    await session.post(cf_url, json={"account_id": account_id, "library": library}, timeout=aiohttp.ClientTimeout(total=4))
+                break
+            except Exception as e:
+                logger.debug(f"Mirror to Cloudflare KV error ({base_url}): {e}")
 
     asyncio.create_task(mirror_to_cf())
 
@@ -2753,7 +2759,7 @@ def get_download_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text="🌐 Официальный сайт Sonora",
-                    url="https://sonora-website.maksinegor821.workers.dev",
+                    url=SONORA_SITE_URL,
                 ),
             ],
             [
@@ -3280,7 +3286,7 @@ async def run_telegram_bot():
                     [
                         InlineKeyboardButton(
                             text="🌐 Открыть на сайте (privacy.html)",
-                            url="https://sonora-website.maksinegor821.workers.dev/privacy.html",
+                            url=f"{SONORA_SITE_URL}/privacy.html",
                         )
                     ],
                     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home")],
@@ -3308,7 +3314,7 @@ async def run_telegram_bot():
                     [
                         InlineKeyboardButton(
                             text="🌐 Открыть на сайте (terms.html)",
-                            url="https://sonora-website.maksinegor821.workers.dev/terms.html",
+                            url=f"{SONORA_SITE_URL}/terms.html",
                         )
                     ],
                     [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_home")],
