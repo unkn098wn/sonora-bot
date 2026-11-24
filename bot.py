@@ -29,7 +29,7 @@ import secrets
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Tuple, List
 from aiohttp import web
 import re
@@ -1565,24 +1565,44 @@ async def handle_send_email_otp(request: web.Request) -> web.Response:
         if linked_user and linked_user.get("telegram_id") and active_bot_instance:
             try:
                 tg_id = int(linked_user["telegram_id"])
-                await active_bot_instance.send_message(
-                    chat_id=tg_id,
-                    text=(
-                        f"🔑 <b>Код авторизации в Sonora Music</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📧 Почта: <code>{raw_email}</code>\n"
-                        f"🔢 Код: <b>{code}</b>\n\n"
-                        f"<i>Действителен 10 минут. Введите его в приложении Sonora.</i>"
+                if email_service.is_configured and send_ok:
+                    await active_bot_instance.send_message(
+                        chat_id=tg_id,
+                        text=(
+                            f"📨 <b>Запрос входа по Email в Sonora Music</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📧 Почта: <code>{raw_email}</code>\n\n"
+                            f"Код подтверждения отправлен на вашу электронную почту. Пожалуйста, проверьте папку «Входящие» (и папку «Спам»).\n\n"
+                            f"<i>Если вы не запрашивали вход, проигнорируйте это уведомление.</i>"
+                        ),
+                        parse_mode="HTML"
                     )
-                )
-                logger.info(f"✓ Push with email OTP sent to Telegram user {tg_id}")
+                else:
+                    await active_bot_instance.send_message(
+                        chat_id=tg_id,
+                        text=(
+                            f"⚠️ <b>Внимание: Почтовый шлюз сервера не настроен!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📧 Почта: <code>{raw_email}</code>\n"
+                            f"Сервер работает без подключённого Resend API / SMTP.\n\n"
+                            f"🔑 Временный код для разработчика: <b>{code}</b>\n\n"
+                            f"<i>Администратор: для отправки реальных писем используйте команду /set_email resend &lt;ключ&gt;</i>"
+                        ),
+                        parse_mode="HTML"
+                    )
+                logger.info(f"✓ Push with email OTP notification sent to Telegram user {tg_id}")
             except Exception as push_err:
                 logger.warning(f"Could not send Telegram push for email OTP: {push_err}")
 
         is_demo = not email_service.is_configured
+        resp_msg = (
+            "Письмо с кодом подтверждения отправлено на вашу почту. Проверьте «Входящие» и «Спам»."
+            if (send_ok and not is_demo)
+            else (send_msg if send_ok else f"Код подтверждения: {code}")
+        )
         return web.json_response({
             "success": True,
-            "message": send_msg if send_ok else f"Код подтверждения: {code}",
+            "message": resp_msg,
             "code": code if (is_demo or not send_ok) else None,
             "is_demo": is_demo,
             "send_ok": send_ok,
@@ -1622,6 +1642,15 @@ async def handle_verify_email_otp(request: web.Request) -> web.Response:
         )
 
         canonical_user_id = user.get("user_id") or (f"tg_{user.get('telegram_id')}" if user.get("telegram_id") else f"email_{hashlib.sha256(raw_email.encode()).hexdigest()[:8]}")
+
+        tg_id = user.get("telegram_id")
+        if tg_id and active_bot_instance:
+            device = str(data.get("device", "")).strip()
+            client_time = str(data.get("client_time", "")).strip()
+            asyncio.create_task(send_telegram_login_alert(
+                tg_id, raw_email, device=device, client_time=client_time
+            ))
+
         return web.json_response({
             "success": True,
             "verified": True,
@@ -1722,25 +1751,44 @@ async def handle_link_email(request: web.Request) -> web.Response:
 
         if tg_id and active_bot_instance:
             try:
-                await active_bot_instance.send_message(
-                    chat_id=tg_id,
-                    text=(
-                        f"🔑 <b>Привязка Email в Sonora Music</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"📧 Почта: <code>{raw_email}</code>\n"
-                        f"🔢 Код подтверждения: <b>{code}</b>\n\n"
-                        f"<i>Действителен 10 минут. Введите его в приложении Sonora для завершения привязки.</i>"
-                    ),
-                    parse_mode="HTML"
-                )
-                logger.info(f"✓ Push with link email OTP sent to Telegram user {tg_id}")
+                if email_service.is_configured and send_ok:
+                    await active_bot_instance.send_message(
+                        chat_id=tg_id,
+                        text=(
+                            f"📨 <b>Привязка Email в Sonora Music</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📧 Почта: <code>{raw_email}</code>\n\n"
+                            f"Код подтверждения отправлен на указанный электронный адрес. Проверьте папку «Входящие» (и папку «Спам»).\n\n"
+                            f"<i>Действителен 10 минут. Введите код из письма в приложении Sonora для завершения привязки.</i>"
+                        ),
+                        parse_mode="HTML"
+                    )
+                else:
+                    await active_bot_instance.send_message(
+                        chat_id=tg_id,
+                        text=(
+                            f"⚠️ <b>Внимание: Почтовый шлюз сервера не настроен!</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📧 Почта: <code>{raw_email}</code>\n"
+                            f"Сервер работает без подключённого Resend API / SMTP.\n\n"
+                            f"🔑 Временный код для разработчика: <b>{code}</b>\n\n"
+                            f"<i>Настройте Resend API командой: /set_email resend &lt;ключ&gt;</i>"
+                        ),
+                        parse_mode="HTML"
+                    )
+                logger.info(f"✓ Notice for link email OTP sent to Telegram user {tg_id}")
             except Exception as push_err:
                 logger.warning(f"Could not send Telegram push for link email OTP: {push_err}")
 
         is_demo = not email_service.is_configured
+        resp_msg = (
+            "Письмо с кодом подтверждения отправлено на вашу почту. Проверьте «Входящие» и «Спам»."
+            if (send_ok and not is_demo)
+            else (send_msg if send_ok else f"Код подтверждения: {code}")
+        )
         return web.json_response({
             "success": True,
-            "message": send_msg if send_ok else f"Код подтверждения: {code}",
+            "message": resp_msg,
             "code": code if (is_demo or not send_ok) else None,
             "is_demo": is_demo,
             "send_ok": send_ok,
@@ -1985,6 +2033,8 @@ async def handle_verify_otp(request: web.Request) -> web.Response:
         data = await request.json()
         handle = data.get("handle", "").strip()
         code = str(data.get("code", "")).strip()
+        device = str(data.get("device", "")).strip()
+        client_time = str(data.get("client_time", "")).strip()
 
         if not handle or not code:
             return web.json_response({"success": False, "error": "Поля handle и code обязательны"}, status=400)
@@ -2012,7 +2062,9 @@ async def handle_verify_otp(request: web.Request) -> web.Response:
 
                 # Send real-time login alert to user in Telegram
                 if active_bot_instance:
-                    asyncio.create_task(send_telegram_login_alert(tg_id, clean_handle))
+                    asyncio.create_task(send_telegram_login_alert(
+                        tg_id, clean_handle, device=device, client_time=client_time
+                    ))
 
             avatar_file = user.get("avatar_file")
             avatar_url = f"{get_public_base_url()}/api/avatar/{clean_handle}"
@@ -2043,18 +2095,62 @@ async def handle_verify_otp(request: web.Request) -> web.Response:
         return web.json_response({"success": False, "error": str(e)}, status=500)
 
 
-async def send_telegram_login_alert(tg_id: int, handle: str):
+async def send_telegram_login_alert(
+    tg_id: int,
+    handle: str,
+    device: Optional[str] = None,
+    client_time: Optional[str] = None,
+):
     """Sends a security notification into user's Telegram chat upon successful Sonora entry."""
     try:
         if active_bot_instance:
+            dev_str = (device or "").strip()
+            dev_lower = dev_str.lower()
+            if any(k in dev_lower for k in ["android", "смартфон", "телефон", "mobile"]):
+                device_title = "Sonora Music (Android)"
+                device_icon = "📱"
+                device_label = dev_str if dev_str else "Android (Смартфон)"
+            elif any(k in dev_lower for k in ["ios", "iphone", "ipad"]):
+                device_title = "Sonora Music (iOS)"
+                device_icon = "📱"
+                device_label = dev_str if dev_str else "iOS (iPhone)"
+            elif "windows" in dev_lower:
+                device_title = "Sonora Music Desktop"
+                device_icon = "💻"
+                device_label = dev_str if dev_str else "Windows Desktop (x64)"
+            elif "linux" in dev_lower:
+                device_title = "Sonora Music Desktop"
+                device_icon = "💻"
+                device_label = dev_str if dev_str else "Linux Desktop"
+            elif any(k in dev_lower for k in ["mac", "darwin"]):
+                device_title = "Sonora Music Desktop"
+                device_icon = "💻"
+                device_label = dev_str if dev_str else "macOS Desktop"
+            elif dev_str:
+                device_title = "Sonora Music"
+                device_icon = "📱" if any(k in dev_lower for k in ["phone", "mobile"]) else "💻"
+                device_label = dev_str
+            else:
+                device_title = "Sonora Music Desktop"
+                device_icon = "💻"
+                device_label = "Windows Desktop (x64)"
+
+            # Always format Moscow time (MSK, UTC+3) as selected by user
+            msk_tz = timezone(timedelta(hours=3))
+            msk_now = datetime.now(msk_tz)
+            time_formatted = msk_now.strftime('%H:%M:%S (%d.%m.%Y)')
+
+            profile_display = f"@{handle}" if (not handle.startswith("@") and "@" not in handle) else handle
+
             text = (
-                "🔐 <b>Успешный вход в Sonora Music Desktop!</b>\n\n"
-                f"Выполнен вход в профиль: <b>@{handle}</b>\n"
-                f"💻 Устройство: Windows Desktop (x64)\n"
-                f"🕒 Время: <code>{datetime.now().strftime('%H:%M:%S (%d.%m.%Y)')}</code>\n\n"
+                f"🔐 <b>Успешный вход в {device_title}!</b>\n\n"
+                f"Выполнен вход в профиль: <b>{profile_display}</b>\n"
+                f"{device_icon} Устройство: {device_label}\n"
+                f"🕒 Время: <code>{time_formatted}</code> (МСК)\n\n"
                 "<i>Если это были не вы, немедленно свяжитесь с поддержкой.</i>"
             )
-            await active_bot_instance.send_message(tg_id, text)
+            await active_bot_instance.send_message(tg_id, text, parse_mode="HTML")
+            logger.info(f"✓ Security login alert sent to {tg_id} ({device_title}, {device_label})")
     except Exception as e:
         logger.warning(f"Could not send login alert to {tg_id}: {e}")
 

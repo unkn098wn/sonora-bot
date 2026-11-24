@@ -3,7 +3,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import urllib.error
 
 # Add parent directory to path
@@ -380,6 +380,41 @@ class TestUserManagerLinking(unittest.IsolatedAsyncioTestCase):
         linked2 = await self.um.link_email_to_user("960674720", "admin_new@sonora.app")
         self.assertEqual(linked2.get("email"), "admin_new@sonora.app")
         self.assertEqual(len(self.um._users), 1, "Should update same record")
+
+
+class TestLoginAlertAndEmailNotification(unittest.IsolatedAsyncioTestCase):
+    async def test_login_alert_device_and_msk_time_formatting(self):
+        import bot
+        mock_bot = MagicMock()
+        mock_bot.send_message = AsyncMock()
+
+        original_bot = bot.active_bot_instance
+        try:
+            bot.active_bot_instance = mock_bot
+
+            # Test Android device
+            await bot.send_telegram_login_alert(
+                960674720, "wezreg", device="Android (Смартфон)"
+            )
+            mock_bot.send_message.assert_called_once()
+            call_args = mock_bot.send_message.call_args[0]
+            text = call_args[1]
+            self.assertIn("Sonora Music (Android)", text)
+            self.assertIn("📱 Устройство: Android (Смартфон)", text)
+            self.assertIn("(МСК)", text)
+
+            # Test Windows device
+            mock_bot.reset_mock()
+            await bot.send_telegram_login_alert(
+                960674720, "wezreg", device="Windows Desktop (x64)"
+            )
+            mock_bot.send_message.assert_called_once()
+            win_text = mock_bot.send_message.call_args[0][1]
+            self.assertIn("Sonora Music Desktop", win_text)
+            self.assertIn("💻 Устройство: Windows Desktop (x64)", win_text)
+            self.assertIn("(МСК)", win_text)
+        finally:
+            bot.active_bot_instance = original_bot
 
 
 if __name__ == "__main__":
