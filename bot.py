@@ -64,7 +64,7 @@ if os.path.isfile(_env_path):
 
 
 SONORA_SITE_URL = os.getenv("SONORA_SITE_URL", "https://sonoramusic.ru")
-SONORA_CF_WORKER_URL = os.getenv("SONORA_CF_WORKER_URL", "https://sonora-website.maksinegor821.workers.dev")
+SONORA_CF_WORKER_URL = os.getenv("SONORA_CF_WORKER_URL", "https://sonora-website.sonoramusic.workers.dev")
 
 # Configure logging
 logging.basicConfig(
