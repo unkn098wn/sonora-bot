@@ -164,7 +164,7 @@ class TestReportsManager(unittest.IsolatedAsyncioTestCase):
             name="John Doe",
             contact="@johndoe",
             message="Player crashes on track switch",
-            version="v2.6.0"
+            version="v2.7.0"
         )
         self.assertTrue(r1["ticket_id"].startswith("SON-"))
         self.assertEqual(r1["status"], "new")
@@ -421,7 +421,7 @@ class TestDownloadsAndFeaturesCard(unittest.TestCase):
     def test_downloads_menu_content(self):
         import bot
         text = bot.format_downloads_menu()
-        self.assertIn("v2.6.0", text)
+        self.assertIn("v2.7.0", text)
         self.assertIn("Студия кастомизации", text)
         self.assertIn("Aura Glow", text)
         self.assertIn("Android", text)
@@ -432,7 +432,7 @@ class TestDownloadsAndFeaturesCard(unittest.TestCase):
     def test_features_card_content(self):
         import bot
         text = bot.format_features_card()
-        self.assertIn("v2.6.0", text)
+        self.assertIn("v2.7.0", text)
         self.assertIn("Студия кастомизации", text)
         self.assertIn("новые темы", text.lower())
         self.assertIn("живые фоны", text.lower())
@@ -447,11 +447,11 @@ class TestDownloadsAndFeaturesCard(unittest.TestCase):
         callbacks = [b.callback_data for b in buttons if b.callback_data]
 
         # Verify Android APK link
-        android_urls = [u for u in urls if "Sonora-v2.6.0-Android.apk" in u]
+        android_urls = [u for u in urls if "Sonora-v2.7.0-Android.apk" in u]
         self.assertTrue(len(android_urls) >= 1)
 
         # Verify Windows Setup.exe link
-        windows_urls = [u for u in urls if "Sonora-v2.6.0-Setup.exe" in u]
+        windows_urls = [u for u in urls if "Sonora-v2.7.0-Setup.exe" in u]
         self.assertTrue(len(windows_urls) >= 1)
 
         # Verify direct document sending button

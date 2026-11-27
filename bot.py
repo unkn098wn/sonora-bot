@@ -388,7 +388,7 @@ class ReportsManager:
         name: str,
         contact: str,
         message: str,
-        version: str = "v2.6.0",
+        version: str = "v2.7.0",
         source: str = "website",
         telegram_id: Optional[int] = None,
         attachment_path: Optional[str] = None
@@ -864,7 +864,7 @@ async def handle_feedback_post(request: web.Request) -> web.Response:
         name = (body.get("name") or "Слушатель Sonora").strip()
         contact = (body.get("contact") or "").strip()
         message = (body.get("message") or "").strip()
-        version = (body.get("version") or "v2.6.0").strip()
+        version = (body.get("version") or "v2.7.0").strip()
         source = (body.get("source") or "website").strip()
 
         if not message:
@@ -1213,7 +1213,7 @@ class EmailService:
                 headers={
                     "Authorization": f"Bearer {self.resend_api_key}",
                     "Content-Type": "application/json",
-                    "User-Agent": "Sonora-Music-Bot/2.6.0",
+                    "User-Agent": "Sonora-Music-Bot/2.7.0",
                 },
                 method="POST",
             )
@@ -1868,20 +1868,20 @@ async def handle_verify_link(request: web.Request) -> web.Response:
 
 async def handle_version(request: web.Request) -> web.Response:
     return web.json_response({
-        "version": "2.6.0",
-        "build_number": 26,
-        "tag_name": "v2.6.0",
-        "release_notes": "Sonora 2.6.0: Синхронизация звука с Android, стабильный seek, умный shuffle, 10-полосный эквалайзер и DSP, единый профиль (Email + Telegram), кнопка дизлайка, жанровые фильтры Моей Волны, категории поиска, добавление и обновление плейлистов, HD-обложки, плавные тексты песен, Shazam.",
-        "download_url_windows": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe",
-        "download_url_android": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk",
+        "version": "2.7.0",
+        "build_number": 27,
+        "tag_name": "v2.7.0",
+        "release_notes": "Sonora 2.7.0: Интерактивный маскот с рикошет-физикой до полной остановки, паркуром каждые 4-9с на всех экранах, 6 TikTok-танцами в бит и исправленным сном; умный кросс-языковой поиск с точным приоритетом оригиналов; ежедневное обновление вкладок Главной; 10-полосный EQ и DSP, единый профиль, облачная синхронизация Cloudflare KV, HD-обложки, тексты песен, Shazam.",
+        "download_url_windows": "https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/Sonora-v2.7.0-Setup.exe",
+        "download_url_android": "https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/Sonora-v2.7.0-Android.apk",
         "assets": [
             {
-                "name": "Sonora-v2.6.0-Setup.exe",
-                "browser_download_url": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe"
+                "name": "Sonora-v2.7.0-Setup.exe",
+                "browser_download_url": "https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/Sonora-v2.7.0-Setup.exe"
             },
             {
-                "name": "Sonora-v2.6.0-Android.apk",
-                "browser_download_url": "https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk"
+                "name": "Sonora-v2.7.0-Android.apk",
+                "browser_download_url": "https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/Sonora-v2.7.0-Android.apk"
             }
         ]
     })
@@ -2476,11 +2476,11 @@ def find_download_file(filename: str) -> Optional[str]:
 
 # Captions with detailed explanations of file purpose
 CAPTION_SETUP = (
-    "💻 <b>Sonora Music v2.6.0 — Windows Setup (Инсталлятор)</b>\n"
+    "💻 <b>Sonora Music v2.7.0 — Windows Setup (Инсталлятор)</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "🎯 <b>Назначение:</b> Официальный установщик для ПК и ноутбуков.\n"
     "💻 <b>Платформа:</b> Windows 10 / 11 (64-bit)\n"
-    "📦 <b>Размер:</b> 30.41 МБ\n\n"
+    "📦 <b>Размер:</b> 30.46 МБ\n\n"
     "⚡ <b>Особенности и преимущества:</b>\n"
     "• Быстрая установка в 1 клик без прав администратора\n"
     "• Удобные ярлыки в меню «Пуск» и на Рабочем столе\n"
@@ -2491,11 +2491,11 @@ CAPTION_SETUP = (
 )
 
 CAPTION_PORTABLE = (
-    "⚡ <b>Sonora Music v2.6.0 — Windows Portable (Без установки)</b>\n"
+    "⚡ <b>Sonora Music v2.7.0 — Windows Portable (Без установки)</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "🎯 <b>Назначение:</b> Портативная версия Sonora, готовая к запуску в 1 клик.\n"
     "💻 <b>Платформа:</b> Windows 10 / 11 (64-bit)\n"
-    "📦 <b>Размер:</b> 38.69 МБ\n\n"
+    "📦 <b>Размер:</b> 38.75 МБ\n\n"
     "⚡ <b>Особенности и преимущества:</b>\n"
     "• Полная автономность: работает без инсталляции в систему\n"
     "• Можно запускать с флешки, съёмного SSD или облачного диска\n"
@@ -2505,11 +2505,11 @@ CAPTION_PORTABLE = (
 )
 
 CAPTION_APK_UNIVERSAL = (
-    "📱 <b>Sonora Music v2.6.0 — Universal Android APK</b>\n"
+    "📱 <b>Sonora Music v2.7.0 — Universal Android APK</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "🎯 <b>Назначение:</b> Единый универсальный установочный пакет для всех устройств Android.\n"
     "📱 <b>Платформа:</b> Android 7.0–15 (поддержка ARM64, ARMv7, x86, x86_64)\n"
-    "📦 <b>Размер:</b> 137.56 МБ\n\n"
+    "📦 <b>Размер:</b> 138.11 МБ\n\n"
     "⚡ <b>Особенности и преимущества:</b>\n"
     "• Подходит абсолютно для любых смартфонов, планшетов, Android TV и эмуляторов\n"
     "• Фоновое воспроизведение музыки без ограничений и рекламы\n"
@@ -2521,11 +2521,11 @@ CAPTION_APK_UNIVERSAL = (
 )
 
 CAPTION_APK_ARM64 = (
-    "📱 <b>Sonora Music v2.6.0 — Android APK (Мобильная версия ARM64)</b>\n"
+    "📱 <b>Sonora Music v2.7.0 — Android APK (Мобильная версия ARM64)</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "🎯 <b>Назначение:</b> Облегченное мобильное приложение Sonora для Android.\n"
     "📱 <b>Платформа:</b> Android 7.0–15 (Архитектура ARM64 — 99% всех смартфонов)\n"
-    "📦 <b>Размер:</b> 48.93 МБ <i>(прямая загрузка файлом в Telegram!)</i>\n\n"
+    "📦 <b>Размер:</b> 49.12 МБ <i>(прямая загрузка файлом в Telegram!)</i>\n\n"
     "⚡ <b>Особенности и преимущества:</b>\n"
     "• Установка напрямую из Telegram в 1 клик без Google Play\n"
     "• Фоновое воспроизведение музыки без ограничений и рекламы\n"
@@ -2536,11 +2536,11 @@ CAPTION_APK_ARM64 = (
 )
 
 CAPTION_APK_ARMV7 = (
-    "📱 <b>Sonora Music v2.6.0 — Android APK (ARMv7 Legacy 32-bit)</b>\n"
+    "📱 <b>Sonora Music v2.7.0 — Android APK (ARMv7 Legacy 32-bit)</b>\n"
     "━━━━━━━━━━━━━━━━━━━━━━\n"
     "🎯 <b>Назначение:</b> Версия для более старых или бюджетных 32-битных смартфонов.\n"
     "📱 <b>Платформа:</b> Android 32-bit (ARMv7)\n"
-    "📦 <b>Размер:</b> 46.21 МБ\n\n"
+    "📦 <b>Размер:</b> 46.38 МБ\n\n"
     "💡 <i>Инструкция: Скачайте файл и нажмите «Установить».</i>"
 )
 
@@ -2593,16 +2593,17 @@ def format_guest_welcome() -> str:
 
 def format_downloads_menu() -> str:
     return (
-        "💿 <b>Официальные установщики Sonora Music v2.6.0 Obsidian Stage:</b>\n"
+        "💿 <b>Официальные установщики Sonora Music v2.7.0 Obsidian Stage:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ <b>Новинки v2.6.0:</b>\n"
-        "• 🎨 <b>Студия кастомизации:</b> 8 акцентов Aura Glow, палитры, адаптивные градиенты\n"
-        "• 🌌 <b>14 живых фонов:</b> Obsidian Lava, Cyber Dot Matrix, Аврора, виниловый диск\n"
-        "• 📱 <b>Кроссплатформенный паритет:</b> безупречная работа и адаптивность на смартфонах и ПК\n"
+        "✨ <b>Новинки v2.7.0:</b>\n"
+        "• 🤖 <b>Интерактивный маскот:</b> рикошет-физика, паркур на всех экранах и 6 TikTok-танцев в бит\n"
+        "• 🧠 <b>Умный поиск:</b> точный приоритет оригиналов, RU↔EN транслит и фонетические опечатки\n"
+        "• 📅 <b>Ежедневные подборки:</b> автоматическое обновление «Свежих релизов», «В тренде» и «Микса дня»\n"
+        "• 🎨 <b>Студия кастомизации:</b> 8 акцентов Aura Glow, палитры, живые фоны и виниловый диск\n"
         "• 🎛️ <b>DSP-студия:</b> 10-полосный EQ, Bass Boost, пространственный звук\n\n"
         "Доступны 2 официальных дистрибутива приложения:\n\n"
-        "📱 <b>Android:</b> Единый универсальный APK (137.6 МБ) — подходит для любых смартфонов и планшетов на Android.\n"
-        "💻 <b>Windows:</b> Полноценный установщик Setup.exe (30.4 МБ) — установка в 1 клик с ярлыком на рабочем столе.\n\n"
+        "📱 <b>Android:</b> Единый универсальный APK (138.1 МБ) — подходит для любых смартфонов и планшетов на Android.\n"
+        "💻 <b>Windows:</b> Полноценный установщик Setup.exe (30.5 МБ) — установка в 1 клик с ярлыком на рабочем столе.\n\n"
         "<i>Нажмите на кнопку нужной системы для моментальной загрузки по прямой ссылке или отправки в чат:</i>"
     )
 
@@ -2621,13 +2622,13 @@ def format_status_card(users_count: int, uptime_str: str) -> str:
         "• Bandcamp • PromoDJ • Mixcloud • Apple Music • Spotify\n\n"
         f"👥 <b>База слушателей:</b> {users_count} зарегистрированных пользователей\n"
         f"⏱️ <b>Время непрерывной работы:</b> {uptime_str}\n"
-        "📦 <b>Версия релиза:</b> v2.6.0 Obsidian Stage"
+        "📦 <b>Версия релиза:</b> v2.7.0 Obsidian Stage"
     )
 
 
 def format_features_card() -> str:
     return (
-        "✨ <b>Возможности Sonora Music v2.6.0:</b>\n"
+        "✨ <b>Возможности Sonora Music v2.7.0:</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "1. 🎨 <b>Студия кастомизации & новые темы:</b>\n"
         "   Полный контроль над стилем: 8 цветовых акцентов (Aura Glow), адаптивные палитры, темный монохром и OLED режим.\n\n"
@@ -2853,14 +2854,14 @@ def get_download_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📱 Скачать для Android (Универсальный APK, 133 МБ)",
-                    url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Android.apk",
+                    text="📱 Скачать для Android (Универсальный APK, 138.1 МБ)",
+                    url="https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/Sonora-v2.7.0-Android.apk",
                 ),
             ],
             [
                 InlineKeyboardButton(
-                    text="💻 Скачать для Windows (Установщик Setup.exe, 28.5 МБ)",
-                    url="https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/Sonora-v2.6.0-Setup.exe",
+                    text="💻 Скачать для Windows (Установщик Setup.exe, 30.5 МБ)",
+                    url="https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/Sonora-v2.7.0-Setup.exe",
                 ),
             ],
             [
@@ -3033,7 +3034,7 @@ async def run_telegram_bot():
             size_bytes = os.path.getsize(file_path)
             # Telegram Bot API standard file upload limit is 50 MB (52,428,800 bytes)
             if size_bytes >= 49 * 1024 * 1024:
-                gh_url = f"https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/{filename}"
+                gh_url = f"https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/{filename}"
                 mb_size = round(size_bytes / (1024 * 1024), 1)
                 text = (
                     f"{caption}\n\n"
@@ -3063,7 +3064,7 @@ async def run_telegram_bot():
                 await callback.answer("✅ Файл успешно отправлен в чат!")
             except Exception as e:
                 logger.error(f"Error sending document {filename}: {e}")
-                direct_url = f"https://github.com/unkn098wn/sonora-website/releases/download/v2.6.0/{filename}"
+                direct_url = f"https://github.com/unkn098wn/sonora-website/releases/download/v2.7.0/{filename}"
                 kb = InlineKeyboardMarkup(
                     inline_keyboard=[
                         [InlineKeyboardButton(text=f"⬇️ Скачать {filename} по прямой ссылке", url=direct_url)],
@@ -3378,26 +3379,26 @@ async def run_telegram_bot():
         # ======================================================================
         @dp.callback_query(F.data.in_(["send_setup", "send_setup_doc"]))
         async def on_send_setup_doc_callback(callback: types.CallbackQuery):
-            setup_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.6.0-Setup.exe")
+            setup_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.7.0-Setup.exe")
             if not os.path.isfile(setup_path):
-                alt_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.6.0-Windows-x64-Setup.exe")
+                alt_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.7.0-Windows-x64-Setup.exe")
                 if os.path.isfile(alt_path):
                     setup_path = alt_path
             await send_file_with_cleanup(
                 callback=callback,
                 file_path=setup_path,
-                filename="Sonora-v2.6.0-Setup.exe",
-                caption="💻 <b>Официальный установщик Sonora Music v2.6.0 для Windows (Setup .exe)</b>\n\n1 клик для установки, ярлык на рабочем столе, Студия кастомизации, Aura Glow, живые фоны и поддержка Hi-Res FLAC.",
+                filename="Sonora-v2.7.0-Setup.exe",
+                caption="💻 <b>Официальный установщик Sonora Music v2.7.0 для Windows (Setup .exe)</b>\n\n1 клик для установки, ярлык на рабочем столе, Студия кастомизации, Aura Glow, живые фоны и поддержка Hi-Res FLAC.",
             )
 
         @dp.callback_query(F.data.in_(["send_apk", "send_apk_doc"]))
         async def on_send_apk_doc_callback(callback: types.CallbackQuery):
-            apk_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.6.0-Android.apk")
+            apk_path = os.path.join(DOWNLOADS_DIR, "Sonora-v2.7.0-Android.apk")
             await send_file_with_cleanup(
                 callback=callback,
                 file_path=apk_path,
-                filename="Sonora-v2.6.0-Android.apk",
-                caption="📱 <b>Официальный APK Sonora Music v2.6.0 для Android</b>\n\nСтудия кастомизации, Aura Glow, живые фоны, синхронные тексты LRC и 18 платформ без рекламы.",
+                filename="Sonora-v2.7.0-Android.apk",
+                caption="📱 <b>Официальный APK Sonora Music v2.7.0 для Android</b>\n\nСтудия кастомизации, Aura Glow, живые фоны, синхронные тексты LRC и 18 платформ без рекламы.",
             )
 
         @dp.callback_query(F.data.in_(["send_portable", "send_apk_arm64", "send_apk_armv7", "send_all"]))
@@ -3625,7 +3626,7 @@ async def run_telegram_bot():
 
                     text_lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
                     text_lines.append(f"<b>#{idx}. Тикет <code>#{tid}</code></b> {cat_icon} {cat_name} | {st_icon} <b>{st_name}</b>")
-                    text_lines.append(f"📅 <code>{date}</code> | 💻 <code>{html.escape(r.get('version', 'v2.6.0'))}</code> | 🌐 {r.get('source', 'website')}")
+                    text_lines.append(f"📅 <code>{date}</code> | 💻 <code>{html.escape(r.get('version', 'v2.7.0'))}</code> | 🌐 {r.get('source', 'website')}")
                     text_lines.append(f"👤 <b>От:</b> {name} (<code>{contact}</code>)")
                     text_lines.append(f"📝 <i>«{msg_preview}»</i>")
 
